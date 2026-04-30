@@ -1,0 +1,197 @@
+//@version=5
+indicator("🤖 FOREX AI SIGNAL — PRO", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+// ⚙️ INPUTS
+// ═══════════════════════════════════════════════════════════════
+grp_ema    = "📈 EMA Settings"
+ema_fast   = input.int(20,  "EMA Fast",  group=grp_ema)
+ema_mid    = input.int(50,  "EMA Mid",   group=grp_ema)
+ema_slow   = input.int(200, "EMA Slow",  group=grp_ema)
+
+grp_filt   = "🔧 Filters"
+rsi_ob     = input.int(65,  "RSI Overbought", group=grp_filt)
+rsi_os     = input.int(35,  "RSI Oversold",   group=grp_filt)
+swing_len  = input.int(5,   "Swing Length (S/R)", group=grp_filt, minval=3, maxval=10)
+atr_mult   = input.float(1.5, "ATR Multiplier for SL", group=grp_filt, step=0.1)
+rr_ratio   = input.float(2.0, "Risk/Reward Ratio", group=grp_filt, step=0.5)
+
+grp_wh     = "🌐 Webhook"
+wh_secret  = input.string("secret123", "Webhook Secret", group=grp_wh)
+
+// ═══════════════════════════════════════════════════════════════
+// 📊 INDICATORS
+// ═══════════════════════════════════════════════════════════════
+ema20  = ta.ema(close, ema_fast)
+ema50  = ta.ema(close, ema_mid)
+ema200 = ta.ema(close, ema_slow)
+
+rsi    = ta.rsi(close, 14)
+atr    = ta.atr(14)
+
+[macd_line, signal_line, hist] = ta.macd(close, 12, 26, 9)
+
+bb_basis = ta.sma(close, 20)
+bb_dev   = ta.stdev(close, 20)
+bb_upper = bb_basis + 2 * bb_dev
+bb_lower = bb_basis - 2 * bb_dev
+
+// ═══════════════════════════════════════════════════════════════
+// 🏗️ SUPPORT / RESISTANCE (Swing High/Low)
+// ═══════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, swing_len, swing_len)
+pl = ta.pivotlow(low,  swing_len, swing_len)
+
+var float last_resistance = na
+var float last_support    = na
+
+if not na(ph)
+    last_resistance := ph
+if not na(pl)
+    last_support    := pl
+
+// ═══════════════════════════════════════════════════════════════
+// 🚦 TREND FILTER
+// ═══════════════════════════════════════════════════════════════
+bullish_trend = ema20 > ema50 and ema50 > ema200
+bearish_trend = ema20 < ema50 and ema50 < ema200
+macd_bull     = macd_line > signal_line and hist > 0
+macd_bear     = macd_line < signal_line and hist < 0
+
+// ═══════════════════════════════════════════════════════════════
+// 🟢 BUY SIGNAL CONDITIONS
+// ═══════════════════════════════════════════════════════════════
+buy_ema_ok  = bullish_trend
+buy_rsi_ok  = rsi > 45 and rsi < rsi_ob
+buy_macd_ok = macd_bull
+buy_price   = not na(last_support) and low <= last_support * 1.001 and close > last_support
+buy_candle  = close > open  // Bullish candle
+
+buy_signal  = buy_ema_ok and buy_rsi_ok and buy_macd_ok and buy_price and buy_candle
+buy_signal  := buy_signal and not buy_signal[1]  // No repeats
+
+// ═══════════════════════════════════════════════════════════════
+// 🔴 SELL SIGNAL CONDITIONS
+// ═══════════════════════════════════════════════════════════════
+sell_ema_ok  = bearish_trend
+sell_rsi_ok  = rsi < 55 and rsi > rsi_os
+sell_macd_ok = macd_bear
+sell_price   = not na(last_resistance) and high >= last_resistance * 0.999 and close < last_resistance
+sell_candle  = close < open  // Bearish candle
+
+sell_signal  = sell_ema_ok and sell_rsi_ok and sell_macd_ok and sell_price and sell_candle
+sell_signal  := sell_signal and not sell_signal[1]  // No repeats
+
+// ═══════════════════════════════════════════════════════════════
+// 🎯 SL / TP LEVELS
+// ═══════════════════════════════════════════════════════════════
+var float entry_price = na
+var float sl_price    = na
+var float tp1_price   = na
+var float tp2_price   = na
+var float tp3_price   = na
+
+if buy_signal
+    entry_price := close
+    sl_price    := close - atr * atr_mult
+    risk        = entry_price - sl_price
+    tp1_price   := entry_price + risk * 1.0
+    tp2_price   := entry_price + risk * 2.0
+    tp3_price   := entry_price + risk * 3.0
+
+if sell_signal
+    entry_price := close
+    sl_price    := close + atr * atr_mult
+    risk        = sl_price - entry_price
+    tp1_price   := entry_price - risk * 1.0
+    tp2_price   := entry_price - risk * 2.0
+    tp3_price   := entry_price - risk * 3.0
+
+// ═══════════════════════════════════════════════════════════════
+// 🎨 VISUAL: EMA LINES
+// ═══════════════════════════════════════════════════════════════
+plot(ema20,  "EMA 20",  color=color.new(color.blue,   0), linewidth=1)
+plot(ema50,  "EMA 50",  color=color.new(color.orange, 0), linewidth=1)
+plot(ema200, "EMA 200", color=color.new(color.red,    0), linewidth=2)
+
+// Bollinger Bands
+plot(bb_upper, "BB Upper", color=color.new(color.gray, 60))
+plot(bb_basis, "BB Mid",   color=color.new(color.gray, 70))
+plot(bb_lower, "BB Lower", color=color.new(color.gray, 60))
+
+// ═══════════════════════════════════════════════════════════════
+// 🏷️ LABELS & LINES on Chart
+// ═══════════════════════════════════════════════════════════════
+if buy_signal
+    label.new(bar_index, low - atr * 0.5,
+              "🟢 BUY\nRSI: " + str.tostring(math.round(rsi, 1)) +
+              "\nSL: " + str.tostring(math.round(sl_price, syminfo.mintick * 10)) +
+              "\nTP1: " + str.tostring(math.round(tp1_price, syminfo.mintick * 10)),
+              color=color.green, textcolor=color.white,
+              style=label.style_label_up, size=size.small)
+    // SL line
+    line.new(bar_index, sl_price,  bar_index + 8, sl_price,  color=color.red,   width=2, style=line.style_dashed)
+    // TP lines
+    line.new(bar_index, tp1_price, bar_index + 8, tp1_price, color=color.lime,  width=1, style=line.style_dotted)
+    line.new(bar_index, tp2_price, bar_index + 8, tp2_price, color=color.lime,  width=2, style=line.style_dotted)
+    line.new(bar_index, tp3_price, bar_index + 8, tp3_price, color=color.lime,  width=3, style=line.style_dotted)
+
+if sell_signal
+    label.new(bar_index, high + atr * 0.5,
+              "🔴 SELL\nRSI: " + str.tostring(math.round(rsi, 1)) +
+              "\nSL: " + str.tostring(math.round(sl_price, syminfo.mintick * 10)) +
+              "\nTP1: " + str.tostring(math.round(tp1_price, syminfo.mintick * 10)),
+              color=color.red, textcolor=color.white,
+              style=label.style_label_down, size=size.small)
+    line.new(bar_index, sl_price,  bar_index + 8, sl_price,  color=color.red,   width=2, style=line.style_dashed)
+    line.new(bar_index, tp1_price, bar_index + 8, tp1_price, color=color.orange, width=1, style=line.style_dotted)
+    line.new(bar_index, tp2_price, bar_index + 8, tp2_price, color=color.orange, width=2, style=line.style_dotted)
+    line.new(bar_index, tp3_price, bar_index + 8, tp3_price, color=color.orange, width=3, style=line.style_dotted)
+
+// Background highlight
+bgcolor(buy_signal  ? color.new(color.green, 90) : na)
+bgcolor(sell_signal ? color.new(color.red,   90) : na)
+
+// ═══════════════════════════════════════════════════════════════
+// 📊 DASHBOARD TABLE
+// ═══════════════════════════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 6,
+                           bgcolor=#0d1117, border_width=1, border_color=#30363d)
+if barstate.islast
+    table.cell(dash, 0, 0, "🤖 FOREX AI", text_color=color.new(color.yellow, 0), text_size=size.normal)
+    table.cell(dash, 1, 0, syminfo.ticker, text_color=color.white, text_size=size.normal)
+    table.cell(dash, 0, 1, "Trend", text_color=color.gray)
+    table.cell(dash, 1, 1,
+               bullish_trend ? "🟢 BULL" : bearish_trend ? "🔴 BEAR" : "⚪ SIDE",
+               text_color=bullish_trend ? color.lime : bearish_trend ? color.red : color.gray)
+    table.cell(dash, 0, 2, "RSI(14)", text_color=color.gray)
+    table.cell(dash, 1, 2, str.tostring(math.round(rsi, 1)),
+               text_color=rsi > rsi_ob ? color.red : rsi < rsi_os ? color.lime : color.white)
+    table.cell(dash, 0, 3, "MACD", text_color=color.gray)
+    table.cell(dash, 1, 3, macd_bull ? "🟢 BULL" : macd_bear ? "🔴 BEAR" : "⚪ N/A",
+               text_color=macd_bull ? color.lime : color.red)
+    table.cell(dash, 0, 4, "ATR", text_color=color.gray)
+    table.cell(dash, 1, 4, str.tostring(math.round(atr, 5)), text_color=color.white)
+    table.cell(dash, 0, 5, "Signal", text_color=color.gray)
+    table.cell(dash, 1, 5,
+               buy_signal ? "🟢 BUY" : sell_signal ? "🔴 SELL" : "⏳ WAIT",
+               text_color=buy_signal ? color.lime : sell_signal ? color.red : color.gray)
+
+// ═══════════════════════════════════════════════════════════════
+// 📡 PLOTS (for webhook {{plot()}} references)
+// ═══════════════════════════════════════════════════════════════
+plot(rsi, "RSI", display=display.none)
+plot(atr, "ATR", display=display.none)
+
+// ═══════════════════════════════════════════════════════════════
+// 🔔 ALERTS
+// ═══════════════════════════════════════════════════════════════
+alertcondition(buy_signal,  "BUY Signal",  "BUY signal triggered")
+alertcondition(sell_signal, "SELL Signal", "SELL signal triggered")
+
+// Alert message format (use this in TradingView Alert → Message field):
+// For BUY alert:
+// {"signal":"BUY","pair":"{{ticker}}","timeframe":"{{interval}}","price":"{{close}}","high":"{{high}}","low":"{{low}}","open":"{{open}}","rsi":"{{plot("RSI")}}","atr":"{{plot("ATR")}}","time":"{{timenow}}"}
+//
+// For SELL alert:
+// {"signal":"SELL","pair":"{{ticker}}","timeframe":"{{interval}}","price":"{{close}}","high":"{{high}}","low":"{{low}}","open":"{{open}}","rsi":"{{plot("RSI")}}","atr":"{{plot("ATR")}}","time":"{{timenow}}"}
