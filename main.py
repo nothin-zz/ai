@@ -312,4 +312,3 @@ if __name__ == "__main__":
     log.info(f"🚀 Server {PORT} portda ishlamoqda...")
     flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
-```
