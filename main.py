@@ -20,9 +20,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
-GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
-WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "secret123")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "8776282635:AAExON8KZhR8w_ZfZthurcLb7LB2AsMuk9A")
+GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "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")
+WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "secret")
 PORT             = int(os.getenv("PORT", 8080))
 GROQ_MODEL       = "llama-3.3-70b-versatile"
 
