@@ -1,0 +1,899 @@
+// ============================================================================
+// MSNR + Fib Algorithm — Institutional-Grade SMC + Fibonacci Confluence System
+// Version  : 3.0.0
+// Platform : TradingView Pine Script v5
+// Author   : MSNR Research Desk
+// Best on  : 5m · 15m · H1
+//
+// ── SECTIONS ────────────────────────────────────────────────────────────────
+//   §0  Boilerplate & version declaration
+//   §1  User inputs
+//   §2  Core constants & color palette
+//   §3  ATR & utility helpers
+//   §4  Swing-high / swing-low detection
+//   §5  Market Structure (BOS / MSS)
+//   §6  Liquidity sweep detection
+//   §7  Order Block detection
+//   §8  Fair-Value Gap (FVG)
+//   §9  OCL (Outside-Candle Liquidity) & Doji confirmation
+//   §10 Fibonacci retracement & extension levels
+//   §11 Fibonacci Circle / Arc (time-price radius)
+//   §12 Confluence scoring engine
+//   §13 Ghost-mode pre-signal system
+//   §14 Entry · SL · TP logic + box/label drawing
+//   §15 Background bias colouring
+//   §16 Statistics / dashboard panel
+//   §17 Alerts
+// ============================================================================
+
+//@version=5
+indicator(
+  title       = "MSNR + Fib Algorithm",
+  shorttitle  = "MSNR·Fib",
+  overlay     = true,
+  max_bars_back = 500,
+  max_boxes_count  = 200,
+  max_lines_count  = 200,
+  max_labels_count = 200
+)
+
+// ============================================================================
+// §1  USER INPUTS
+// ============================================================================
+
+// ── Module toggles ──────────────────────────────────────────────────────────
+grp_mod = "⚙️  Module Toggles"
+i_showSMC    = input.bool(true,  "Show SMC (BOS / MSS / OB / FVG)",   group = grp_mod, tooltip = "Draws all Smart Money Concept overlays.")
+i_showFib    = input.bool(true,  "Show Fibonacci Retracement",          group = grp_mod, tooltip = "Draws Fib levels from the last major swing.")
+i_showFibArc = input.bool(true,  "Show Fibonacci Circle / Arc",         group = grp_mod, tooltip = "Projects time-price arc for temporal confluence.")
+i_showPanel  = input.bool(true,  "Show Statistics Panel",               group = grp_mod, tooltip = "Dashboard in the corner with live confluence data.")
+i_showGhost  = input.bool(true,  "Show Ghost (Pre-signal) Mode",        group = grp_mod, tooltip = "Semi-transparent potential setups before confirmation.")
+i_showTP     = input.bool(true,  "Show TP / SL Boxes",                  group = grp_mod, tooltip = "Draws TP1 · TP2 · TP3 and SL boxes on confirmed entries.")
+i_bgBias     = input.bool(true,  "Background Trend Bias Colour",        group = grp_mod, tooltip = "Tints the chart background green / red based on bias.")
+
+// ── SMC parameters ──────────────────────────────────────────────────────────
+grp_smc = "📐  SMC Parameters"
+i_swingLen   = input.int (10, "Swing Lookback (bars)",  minval = 3,  maxval = 50, group = grp_smc, tooltip = "Bars left/right used to confirm a swing high/low pivot.")
+i_obLookback = input.int (30, "Order Block Lookback",   minval = 5,  maxval = 100, group = grp_smc)
+i_fvgMinPct  = input.float(0.05, "Min FVG Size (%)",  minval = 0.01, maxval = 2.0, step = 0.01, group = grp_smc, tooltip = "Minimum gap size to qualify as a valid Fair Value Gap.")
+
+// ── Fibonacci parameters ────────────────────────────────────────────────────
+grp_fib = "📏  Fibonacci Settings"
+i_fibLookback = input.int(50, "Fib Swing Lookback",  minval = 10, maxval = 200, group = grp_fib)
+i_fibArcRad   = input.int(21, "Fib Arc Radius (bars)", minval = 5, maxval = 100, group = grp_fib, tooltip = "Radius in bars for the Fibonacci Circle arc projection.")
+
+// ── Signal / entry parameters ───────────────────────────────────────────────
+grp_sig = "🎯  Signal & Entry Settings"
+i_minConf     = input.int (4, "Min Confluence Score (1-6)", minval = 1, maxval = 6, group = grp_sig, tooltip = "Minimum number of confluences required before a confirmed signal fires.")
+i_atrMult     = input.float(1.5, "ATR Multiplier (SL buffer)", minval = 0.5, maxval = 5.0, step = 0.1, group = grp_sig)
+i_atrLen      = input.int (14, "ATR Length", minval = 5, maxval = 50, group = grp_sig)
+i_riskPct     = input.float(1.0, "Account Risk % per Trade", minval = 0.1, maxval = 10.0, step = 0.1, group = grp_sig, tooltip = "Used for position-size suggestion in the dashboard.")
+i_accountSize = input.float(10000, "Account Size (USD)", minval = 100, group = grp_sig)
+
+// ============================================================================
+// §2  CORE CONSTANTS & COLOUR PALETTE
+// ============================================================================
+
+// ── Primary colours ─────────────────────────────────────────────────────────
+C_BULL        = color.new(#00D4A5, 0)   // Emerald green — solid
+C_BEAR        = color.new(#FF4757, 0)   // Crimson red   — solid
+C_BULL_GHOST  = color.new(#00D4A5, 60)  // Ghost bull
+C_BEAR_GHOST  = color.new(#FF4757, 60)  // Ghost bear
+C_BULL_BG     = color.new(#00D4A5, 93)  // Background bias tint bull
+C_BEAR_BG     = color.new(#FF4757, 93)  // Background bias tint bear
+C_NEUTRAL_BG  = color.new(#778CA3, 97)  // Neutral background
+
+// ── Zone fill colours ───────────────────────────────────────────────────────
+C_OB_BULL_FILL  = color.new(#00D4A5, 82)
+C_OB_BEAR_FILL  = color.new(#FF4757, 82)
+C_FVG_BULL_FILL = color.new(#00D4A5, 88)
+C_FVG_BEAR_FILL = color.new(#FF4757, 88)
+
+// ── Fibonacci colours ───────────────────────────────────────────────────────
+C_FIB_0618 = color.new(#F7C59F, 0)
+C_FIB_0786 = color.new(#FFD700, 0)
+C_FIB_10   = color.new(#C0C0C0, 0)
+C_FIB_1618 = color.new(#00D4A5, 0)
+C_FIB_2618 = color.new(#82E0AA, 0)
+C_FIB_3618 = color.new(#AED6F1, 0)
+
+// ── TP / SL colours ─────────────────────────────────────────────────────────
+C_SL  = color.new(#FF4757, 75)
+C_TP1 = color.new(#00D4A5, 75)
+C_TP2 = color.new(#00B894, 65)
+C_TP3 = color.new(#00A389, 55)
+
+// ── Dashboard colours ───────────────────────────────────────────────────────
+C_TBL_BG    = color.new(#0D1117, 10)
+C_TBL_HDR   = color.new(#161B22, 5)
+C_TBL_BDR   = color.new(#30363D, 0)
+C_TBL_TXT   = color.new(#E6EDF3, 0)
+C_TBL_BULL  = color.new(#00D4A5, 0)
+C_TBL_BEAR  = color.new(#FF4757, 0)
+C_TBL_WARN  = color.new(#FFD700, 0)
+C_TBL_DIM   = color.new(#778CA3, 0)
+
+// ============================================================================
+// §3  ATR & UTILITY HELPERS
+// ============================================================================
+
+atr14 = ta.atr(i_atrLen)
+
+// Price-percentage distance helper
+pctDist(a, b) =>
+    math.abs(a - b) / b * 100.0
+
+// Clamp helper
+clamp(v, lo, hi) =>
+    math.max(lo, math.min(hi, v))
+
+// ============================================================================
+// §4  SWING HIGH / SWING LOW DETECTION
+// ============================================================================
+
+// Uses ta.pivothigh / ta.pivotlow for clean, non-repainting pivots
+// NOTE: pivothigh/pivotlow confirm `length` bars *after* the pivot bar → no repaint
+
+swH = ta.pivothigh(high, i_swingLen, i_swingLen)
+swL = ta.pivotlow (low,  i_swingLen, i_swingLen)
+
+// Track the most recent confirmed swing high/low price and bar index
+var float lastSwH     = na
+var int   lastSwH_bar = na
+var float lastSwL     = na
+var int   lastSwL_bar = na
+
+if not na(swH)
+    lastSwH     := swH
+    lastSwH_bar := bar_index - i_swingLen   // actual pivot bar
+
+if not na(swL)
+    lastSwL     := swL
+    lastSwL_bar := bar_index - i_swingLen
+
+// ============================================================================
+// §5  MARKET STRUCTURE — BOS & MSS
+// ============================================================================
+// BOS  = Break Of Structure  (continuation — price closes beyond last swing)
+// MSS  = Market Structure Shift (reversal — price sweeps then closes opposite)
+
+var bool bosLong  = false   // Bullish BOS on this confirmed bar
+var bool bosShort = false
+var bool mssLong  = false   // Bullish MSS (sweep low → close above last swH)
+var bool mssShort = false
+
+var float prevSwH = na
+var float prevSwL = na
+
+// Refresh previous swings one pivot cycle back
+var float prevSwH2 = na
+var float prevSwL2 = na
+
+if not na(swH)
+    prevSwH2 := prevSwH
+    prevSwH  := swH
+
+if not na(swL)
+    prevSwL2 := prevSwL
+    prevSwL  := swL
+
+// BOS detection (confirmed bar only)
+bosLong  := ta.barstate.isconfirmed and not na(prevSwH) and close > prevSwH and close[1] <= prevSwH
+bosShort := ta.barstate.isconfirmed and not na(prevSwL) and close < prevSwL and close[1] >= prevSwL
+
+// MSS: price wicks below previous swing low then closes above → bullish reversal
+mssLong  := ta.barstate.isconfirmed and not na(prevSwL) and low < prevSwL and close > prevSwL
+mssShort := ta.barstate.isconfirmed and not na(prevSwH) and high > prevSwH and close < prevSwH
+
+// Persistent state for dashboard
+var bool hasBOS_Bull = false
+var bool hasBOS_Bear = false
+var bool hasMSS_Bull = false
+var bool hasMSS_Bear = false
+
+if bosLong  then hasBOS_Bull := true
+if bosShort then hasBOS_Bear := true
+if mssLong  then hasMSS_Bull := true
+if mssShort then hasMSS_Bear := true
+
+// Plot BOS / MSS labels (SMC module)
+if i_showSMC
+    if bosLong
+        label.new(bar_index, low - atr14 * 0.6,
+          "BOS ▲", color = C_BULL, textcolor = color.white,
+          style = label.style_label_up, size = size.tiny)
+    if bosShort
+        label.new(bar_index, high + atr14 * 0.6,
+          "BOS ▼", color = C_BEAR, textcolor = color.white,
+          style = label.style_label_down, size = size.tiny)
+    if mssLong
+        label.new(bar_index, low - atr14 * 1.1,
+          "MSS ▲", color = C_BULL, textcolor = color.black,
+          style = label.style_label_up, size = size.tiny)
+    if mssShort
+        label.new(bar_index, high + atr14 * 1.1,
+          "MSS ▼", color = C_BEAR, textcolor = color.black,
+          style = label.style_label_down, size = size.tiny)
+
+// ============================================================================
+// §6  LIQUIDITY SWEEP DETECTION
+// ============================================================================
+// A liquidity sweep occurs when price wicks beyond a swing and then closes back
+
+var bool liqSweepBull = false   // Swept lows (buy-side liquidity taken)
+var bool liqSweepBear = false   // Swept highs
+
+liqSweepBull := ta.barstate.isconfirmed and not na(prevSwL) and
+  low < prevSwL and close > prevSwL
+
+liqSweepBear := ta.barstate.isconfirmed and not na(prevSwH) and
+  high > prevSwH and close < prevSwH
+
+var bool hasLiqBull = false
+var bool hasLiqBear = false
+
+if liqSweepBull then hasLiqBull := true
+if liqSweepBear then hasLiqBear := true
+
+if i_showSMC
+    if liqSweepBull
+        label.new(bar_index, low - atr14 * 1.7,
+          "💧 Sweep", color = color.new(#00BCD4, 15), textcolor = color.white,
+          style = label.style_label_up, size = size.tiny)
+    if liqSweepBear
+        label.new(bar_index, high + atr14 * 1.7,
+          "💧 Sweep", color = color.new(#00BCD4, 15), textcolor = color.white,
+          style = label.style_label_down, size = size.tiny)
+
+// ============================================================================
+// §7  ORDER BLOCK DETECTION
+// ============================================================================
+// Last bearish candle before a bullish BOS = Bullish OB
+// Last bullish candle before a bearish BOS = Bearish OB
+
+var float obBullTop = na,   var float obBullBot = na,  var int obBullBar = na
+var float obBearTop = na,   var float obBearBot = na,  var int obBearBar = na
+var box   obBullBox = na
+var box   obBearBox = na
+
+// Find OB candle on BOS events
+if bosLong and i_showSMC
+    // Search back for the last bearish candle within lookback
+    for i = 1 to i_obLookback
+        if close[i] < open[i]   // bearish body
+            obBullTop := math.max(open[i], close[i])
+            obBullBot := math.min(open[i], close[i])
+            obBullBar := bar_index - i
+            if not na(obBullBox)
+                box.delete(obBullBox)
+            obBullBox := box.new(
+              obBullBar, obBullTop, bar_index + 30, obBullBot,
+              border_color = C_BULL, border_width = 1,
+              bgcolor = C_OB_BULL_FILL)
+            break
+
+if bosShort and i_showSMC
+    for i = 1 to i_obLookback
+        if close[i] > open[i]   // bullish body
+            obBearTop := math.max(open[i], close[i])
+            obBearBot := math.min(open[i], close[i])
+            obBearBar := bar_index - i
+            if not na(obBearBox)
+                box.delete(obBearBox)
+            obBearBox := box.new(
+              obBearBar, obBearTop, bar_index + 30, obBearBot,
+              border_color = C_BEAR, border_width = 1,
+              bgcolor = C_OB_BEAR_FILL)
+            break
+
+// ============================================================================
+// §8  FAIR VALUE GAP (FVG)
+// ============================================================================
+// 3-candle pattern: gap between candle[-2].high and candle[0].low (bullish)
+//                   gap between candle[-2].low  and candle[0].high (bearish)
+
+var box fvgBoxLast = na
+
+fvgBull = ta.barstate.isconfirmed and
+  low > high[2] and
+  (low - high[2]) / close * 100 >= i_fvgMinPct
+
+fvgBear = ta.barstate.isconfirmed and
+  high < low[2] and
+  (low[2] - high) / close * 100 >= i_fvgMinPct
+
+if i_showSMC
+    if fvgBull
+        box.new(bar_index - 2, low, bar_index + 20, high[2],
+          border_color = C_BULL_GHOST, bgcolor = C_FVG_BULL_FILL,
+          border_width = 1, border_style = line.style_dotted)
+    if fvgBear
+        box.new(bar_index - 2, low[2], bar_index + 20, high,
+          border_color = C_BEAR_GHOST, bgcolor = C_FVG_BEAR_FILL,
+          border_width = 1, border_style = line.style_dotted)
+
+// ============================================================================
+// §9  OCL (OUTSIDE-CANDLE LIQUIDITY) & DOJI CONFIRMATION
+// ============================================================================
+
+// Doji: body ≤ 10 % of total range
+bodyPct = math.abs(close - open) / (high - low + 0.000001) * 100
+isDoji  = ta.barstate.isconfirmed and bodyPct <= 10.0
+
+// OCL: current candle engulfs previous (outside candle)
+isOCL_Bull = ta.barstate.isconfirmed and
+  low < low[1] and high > high[1] and close > open     // bullish OCL
+
+isOCL_Bear = ta.barstate.isconfirmed and
+  low < low[1] and high > high[1] and close < open     // bearish OCL
+
+if i_showSMC
+    if isDoji
+        label.new(bar_index, high + atr14 * 0.3,
+          "✦", color = color.new(#FFD700, 20), textcolor = color.black,
+          style = label.style_label_down, size = size.tiny,
+          tooltip = "Doji — indecision / potential reversal")
+    if isOCL_Bull
+        label.new(bar_index, low - atr14 * 0.3,
+          "OCL", color = C_BULL_GHOST, textcolor = color.white,
+          style = label.style_label_up, size = size.tiny,
+          tooltip = "Bullish Outside Candle Liquidity sweep")
+    if isOCL_Bear
+        label.new(bar_index, high + atr14 * 0.3,
+          "OCL", color = C_BEAR_GHOST, textcolor = color.white,
+          style = label.style_label_down, size = size.tiny,
+          tooltip = "Bearish Outside Candle Liquidity sweep")
+
+// ============================================================================
+// §10  FIBONACCI RETRACEMENT & EXTENSION LEVELS
+// ============================================================================
+
+// Determine major swing using recent confirmed pivots
+var float fibHigh = na
+var float fibLow  = na
+var bool  fibBull = false   // Retracing from High → Low (looking for long)
+var bool  fibBear = false   // Retracing from Low  → High (looking for short)
+
+// Identify which came last: swH or swL
+if not na(lastSwH) and not na(lastSwL)
+    if lastSwH_bar > lastSwL_bar
+        // Swing high is more recent → likely retracing down → bullish fib
+        fibHigh := lastSwH
+        fibLow  := lastSwL
+        fibBull := true
+        fibBear := false
+    else
+        fibHigh := lastSwH
+        fibLow  := lastSwL
+        fibBull := false
+        fibBear := true
+
+fibRange = fibHigh - fibLow
+
+// Retracement levels (from swing high down for bullish setup)
+fib0618 = fibBull ? fibHigh - fibRange * 0.618 : fibLow + fibRange * 0.618
+fib0786 = fibBull ? fibHigh - fibRange * 0.786 : fibLow + fibRange * 0.786
+fib100  = fibBull ? fibLow   : fibHigh
+
+// Extension levels
+fib1618 = fibBull ? fibLow - fibRange * 0.618 : fibHigh + fibRange * 0.618
+fib2618 = fibBull ? fibLow - fibRange * 1.618 : fibHigh + fibRange * 1.618
+fib3618 = fibBull ? fibLow - fibRange * 2.618 : fibHigh + fibRange * 2.618
+
+// Helper: is price near a fib level? (within 0.25 % of price)
+nearFib(level) =>
+    not na(level) and pctDist(close, level) <= 0.25
+
+atFib0618 = i_showFib and nearFib(fib0618)
+atFib0786 = i_showFib and nearFib(fib0786)
+atFib100  = i_showFib and nearFib(fib100)
+
+// Draw Fibonacci lines on confirmed bars (draw once per swing update)
+var line lFib0618 = na,  var line lFib0786 = na
+var line lFib100  = na,  var line lFib1618 = na
+var line lFib2618 = na,  var line lFib3618 = na
+
+var int lastFibDraw = na
+
+drawFibs() =>
+    if not na(lFib0618) then line.delete(lFib0618)
+    if not na(lFib0786) then line.delete(lFib0786)
+    if not na(lFib100)  then line.delete(lFib100)
+    if not na(lFib1618) then line.delete(lFib1618)
+    if not na(lFib2618) then line.delete(lFib2618)
+    if not na(lFib3618) then line.delete(lFib3618)
+
+    startBar = math.min(lastSwH_bar, lastSwL_bar)
+    endBar   = bar_index + i_fibArcRad
+
+    lFib0618 := line.new(startBar, fib0618, endBar, fib0618,
+      color = C_FIB_0618, width = 1, style = line.style_dashed,
+      extend = extend.right)
+    lFib0786 := line.new(startBar, fib0786, endBar, fib0786,
+      color = C_FIB_0786, width = 1, style = line.style_dashed,
+      extend = extend.right)
+    lFib100  := line.new(startBar, fib100,  endBar, fib100,
+      color = C_FIB_10,   width = 1, style = line.style_dotted,
+      extend = extend.right)
+    lFib1618 := line.new(startBar, fib1618, endBar, fib1618,
+      color = C_FIB_1618, width = 1, style = line.style_dashed,
+      extend = extend.right)
+    lFib2618 := line.new(startBar, fib2618, endBar, fib2618,
+      color = C_FIB_2618, width = 1, style = line.style_dashed,
+      extend = extend.right)
+    lFib3618 := line.new(startBar, fib3618, endBar, fib3618,
+      color = C_FIB_3618, width = 1, style = line.style_dashed,
+      extend = extend.right)
+    // Fib level labels
+    label.new(endBar, fib0618, " 0.618", color = color.new(color.black, 100),
+      textcolor = C_FIB_0618, style = label.style_none, size = size.tiny)
+    label.new(endBar, fib0786, " 0.786", color = color.new(color.black, 100),
+      textcolor = C_FIB_0786, style = label.style_none, size = size.tiny)
+    label.new(endBar, fib1618, " 1.618", color = color.new(color.black, 100),
+      textcolor = C_FIB_1618, style = label.style_none, size = size.tiny)
+    label.new(endBar, fib2618, " 2.618", color = color.new(color.black, 100),
+      textcolor = C_FIB_2618, style = label.style_none, size = size.tiny)
+    label.new(endBar, fib3618, " 3.618", color = color.new(color.black, 100),
+      textcolor = C_FIB_3618, style = label.style_none, size = size.tiny)
+
+// Redraw when swing pivots change
+var int prevSwH_bar_snap = na
+var int prevSwL_bar_snap = na
+
+if i_showFib and ta.barstate.isconfirmed and
+  (lastSwH_bar != prevSwH_bar_snap or lastSwL_bar != prevSwL_bar_snap)
+    drawFibs()
+    prevSwH_bar_snap := lastSwH_bar
+    prevSwL_bar_snap := lastSwL_bar
+
+// Nearest fib distance (for dashboard)
+nearestFibDist = 999.0
+nearestFibName = "—"
+
+if i_showFib and not na(fib0618)
+    d0618 = pctDist(close, fib0618)
+    d0786 = pctDist(close, fib0786)
+    d100  = pctDist(close, fib100)
+    d1618 = pctDist(close, fib1618)
+
+    if d0618 < nearestFibDist
+        nearestFibDist := d0618
+        nearestFibName := "0.618"
+    if d0786 < nearestFibDist
+        nearestFibDist := d0786
+        nearestFibName := "0.786"
+    if d100 < nearestFibDist
+        nearestFibDist := d100
+        nearestFibName := "1.000"
+    if d1618 < nearestFibDist
+        nearestFibDist := d1618
+        nearestFibName := "1.618"
+
+// ============================================================================
+// §11  FIBONACCI CIRCLE / ARC
+// ============================================================================
+// Projects a time-price arc from the last major swing.
+// We approximate an "arc" by plotting line segments along a circular radius.
+// The arc represents the Fib‐Circle time confluence zone.
+
+var line[] arcLines = array.new_line()
+
+drawArc(swBar, swPrice, isHigh) =>
+    // Clear previous arc lines
+    while array.size(arcLines) > 0
+        line.delete(array.pop(arcLines))
+    // Radius expressed as price units (ATR-normalized)
+    radius_p = atr14 * i_fibArcRad * 0.5
+    // Arc spans ±90° from vertical through swing point
+    steps = 36
+    for s = 0 to steps - 1
+        angle1 = math.pi * (s)       / steps  // 0 → π
+        angle2 = math.pi * (s + 1)   / steps
+        x1 = swBar + math.round(i_fibArcRad * math.cos(angle1))
+        y1 = swPrice + (isHigh ? -1 : 1) * radius_p * math.sin(angle1)
+        x2 = swBar + math.round(i_fibArcRad * math.cos(angle2))
+        y2 = swPrice + (isHigh ? -1 : 1) * radius_p * math.sin(angle2)
+        arcLine = line.new(x1, y1, x2, y2,
+          color = color.new(#9B59B6, 50), width = 1,
+          style = line.style_dotted)
+        array.push(arcLines, arcLine)
+
+var int lastArcSwBar   = na
+var bool lastArcIsHigh = false
+
+if i_showFibArc and ta.barstate.isconfirmed
+    // Redraw arc when swing changes
+    pivBar   = fibBull ? lastSwH_bar : lastSwL_bar
+    pivPrice = fibBull ? lastSwH     : lastSwL
+    isHigh   = fibBull
+
+    if pivBar != lastArcSwBar
+        if not na(pivBar) and not na(pivPrice)
+            drawArc(pivBar, pivPrice, isHigh)
+            lastArcSwBar   := pivBar
+            lastArcIsHigh  := isHigh
+
+// ============================================================================
+// §12  CONFLUENCE SCORING ENGINE
+// ============================================================================
+// Scores 0-6 based on independent technical confluences.
+// Each factor is boolean (present / absent).
+
+// C1: BOS confirmed
+c1_bull = (bosLong or hasBOS_Bull)
+c1_bear = (bosShort or hasBOS_Bear)
+
+// C2: MSS confirmed
+c2_bull = (mssLong or hasMSS_Bull)
+c2_bear = (mssShort or hasMSS_Bear)
+
+// C3: Liquidity swept
+c3_bull = liqSweepBull or hasLiqBull
+c3_bear = liqSweepBear or hasLiqBear
+
+// C4: Price at key Fib (0.618 or 0.786)
+c4_bull = i_showFib and fibBull and (atFib0618 or atFib0786)
+c4_bear = i_showFib and fibBear and (atFib0618 or atFib0786)
+
+// C5: Order Block present
+c5_bull = not na(obBullTop) and close >= obBullBot and close <= obBullTop * 1.005
+c5_bear = not na(obBearTop) and close >= obBearBot * 0.995 and close <= obBearTop
+
+// C6: Doji or OCL candle confirmation
+c6_bull = isDoji or isOCL_Bull
+c6_bear = isDoji or isOCL_Bear
+
+// Scores
+score_bull = (c1_bull ? 1 : 0) + (c2_bull ? 1 : 0) + (c3_bull ? 1 : 0) +
+             (c4_bull ? 1 : 0) + (c5_bull ? 1 : 0) + (c6_bull ? 1 : 0)
+
+score_bear = (c1_bear ? 1 : 0) + (c2_bear ? 1 : 0) + (c3_bear ? 1 : 0) +
+             (c4_bear ? 1 : 0) + (c5_bear ? 1 : 0) + (c6_bear ? 1 : 0)
+
+// Overall trend bias
+trendBias = score_bull > score_bear ? 1 :
+            score_bear > score_bull ? -1 : 0   // 1=bull, -1=bear, 0=neutral
+
+// Win probability: linear model calibrated to score
+winProb_bull = math.round(clamp(score_bull / 6.0 * 78 + 12, 15, 90))
+winProb_bear = math.round(clamp(score_bear / 6.0 * 78 + 12, 15, 90))
+
+// RR suggestion based on score
+rrStr(score) =>
+    score >= 6 ? "1 : 3.5" :
+    score >= 5 ? "1 : 3.0" :
+    score >= 4 ? "1 : 2.5" :
+    score >= 3 ? "1 : 2.0" : "1 : 1.5"
+
+// ============================================================================
+// §13  GHOST-MODE PRE-SIGNAL SYSTEM
+// ============================================================================
+// Ghost signals appear when score is ≥ (i_minConf - 1), but not yet confirmed.
+// Confirmed signals require score ≥ i_minConf AND candle closed.
+
+var int ghostLongCount  = 0
+var int ghostShortCount = 0
+
+isGhostLong    = i_showGhost and score_bull >= (i_minConf - 1) and score_bull < i_minConf
+isGhostShort   = i_showGhost and score_bear >= (i_minConf - 1) and score_bear < i_minConf
+isConfirmLong  = ta.barstate.isconfirmed and score_bull >= i_minConf
+isConfirmShort = ta.barstate.isconfirmed and score_bear >= i_minConf
+
+if isGhostLong
+    ghostLongCount += 1
+    label.new(bar_index, low - atr14 * 2.5,
+      "👻 Potential Long\nScore: " + str.tostring(score_bull) + "/6",
+      color = C_BULL_GHOST, textcolor = color.white,
+      style = label.style_label_up, size = size.small,
+      tooltip = "Ghost long setup — not yet confirmed. Awaiting final confluence.")
+
+if isGhostShort
+    ghostShortCount += 1
+    label.new(bar_index, high + atr14 * 2.5,
+      "👻 Potential Short\nScore: " + str.tostring(score_bear) + "/6",
+      color = C_BEAR_GHOST, textcolor = color.white,
+      style = label.style_label_down, size = size.small,
+      tooltip = "Ghost short setup — not yet confirmed. Awaiting final confluence.")
+
+if isConfirmLong
+    label.new(bar_index, low - atr14 * 3.2,
+      "✅ CONFIRMED LONG\nScore: " + str.tostring(score_bull) + "/6",
+      color = C_BULL, textcolor = color.black,
+      style = label.style_label_up, size = size.normal,
+      tooltip = "All confluences met. Institutional long entry signal.")
+
+if isConfirmShort
+    label.new(bar_index, high + atr14 * 3.2,
+      "✅ CONFIRMED SHORT\nScore: " + str.tostring(score_bear) + "/6",
+      color = C_BEAR, textcolor = color.white,
+      style = label.style_label_down, size = size.normal,
+      tooltip = "All confluences met. Institutional short entry signal.")
+
+// ============================================================================
+// §14  ENTRY · SL · TP LOGIC + BOX/LABEL DRAWING
+// ============================================================================
+
+// ── SL calculation ──────────────────────────────────────────────────────────
+// For longs:  SL = below OB bottom (or recent swing low) minus ATR buffer
+// For shorts: SL = above OB top  (or recent swing high) plus ATR buffer
+
+slBuf = atr14 * i_atrMult
+
+slLong  = not na(obBullBot) ? obBullBot - slBuf :
+          not na(lastSwL)   ? lastSwL   - slBuf : close - slBuf * 2.0
+
+slShort = not na(obBearTop) ? obBearTop + slBuf :
+          not na(lastSwH)   ? lastSwH   + slBuf : close + slBuf * 2.0
+
+// ── TP calculation ───────────────────────────────────────────────────────────
+// TP based on Fibonacci extensions where available, else on RR multiples
+
+calcTP(entry, sl, isBull) =>
+    riskDist = math.abs(entry - sl)
+    tp1 = isBull ? entry + riskDist * 2.0  : entry - riskDist * 2.0
+    tp2 = isBull ? entry + riskDist * 3.0  : entry - riskDist * 3.0
+    tp3 = isBull ? entry + riskDist * 4.5  : entry - riskDist * 4.5
+    // Override with Fib extensions when close enough
+    if isBull and not na(fib1618) and fib1618 > entry
+        tp1 := fib1618
+    if isBull and not na(fib2618) and fib2618 > entry
+        tp2 := fib2618
+    if isBull and not na(fib3618) and fib3618 > entry
+        tp3 := fib3618
+    if not isBull and not na(fib1618) and fib1618 < entry
+        tp1 := fib1618
+    if not isBull and not na(fib2618) and fib2618 < entry
+        tp2 := fib2618
+    if not isBull and not na(fib3618) and fib3618 < entry
+        tp3 := fib3618
+    [tp1, tp2, tp3]
+
+// Position size suggestion: risk$ / (entry - SL) = lots/units
+calcPosSize(entry, sl) =>
+    riskAmt  = i_accountSize * i_riskPct / 100.0
+    slPoints = math.abs(entry - sl)
+    slPoints > 0.0 ? riskAmt / slPoints : 0.0
+
+// ── Draw entry / SL / TP boxes on confirmed signal ──────────────────────────
+drawTradeBoxes(entry, sl, isBull) =>
+    [tp1, tp2, tp3] = calcTP(entry, sl, isBull)
+    rr1 = math.round(math.abs(tp1 - entry) / math.abs(entry - sl) * 10) / 10
+    rr2 = math.round(math.abs(tp2 - entry) / math.abs(entry - sl) * 10) / 10
+    rr3 = math.round(math.abs(tp3 - entry) / math.abs(entry - sl) * 10) / 10
+
+    xL = bar_index
+    xR = bar_index + 40
+
+    // SL box
+    box.new(xL, entry, xR, sl,
+      border_color = C_BEAR, bgcolor = C_SL, border_width = 1,
+      border_style = line.style_solid)
+    label.new(xR, sl, " SL", color = color.new(color.black, 100),
+      textcolor = C_BEAR, style = label.style_none, size = size.small)
+
+    // TP1 box
+    box.new(xL, tp1, xR, entry,
+      border_color = C_TP1, bgcolor = C_TP1, border_width = 1)
+    label.new(xR, tp1, " TP1 (1:" + str.tostring(rr1) + ")",
+      color = color.new(color.black, 100),
+      textcolor = C_BULL, style = label.style_none, size = size.small)
+
+    // TP2 box
+    box.new(xL, tp2, xR, tp1,
+      border_color = C_TP2, bgcolor = C_TP2, border_width = 1)
+    label.new(xR, tp2, " TP2 (1:" + str.tostring(rr2) + ")",
+      color = color.new(color.black, 100),
+      textcolor = C_BULL, style = label.style_none, size = size.small)
+
+    // TP3 box
+    box.new(xL, tp3, xR, tp2,
+      border_color = C_TP3, bgcolor = C_TP3, border_width = 1)
+    label.new(xR, tp3, " TP3 (1:" + str.tostring(rr3) + ")",
+      color = color.new(color.black, 100),
+      textcolor = C_BULL, style = label.style_none, size = size.small)
+
+if i_showTP
+    if isConfirmLong
+        drawTradeBoxes(close, slLong, true)
+    if isConfirmShort
+        drawTradeBoxes(close, slShort, false)
+
+// ============================================================================
+// §15  BACKGROUND TREND BIAS COLOURING
+// ============================================================================
+
+bgCol = i_bgBias ?
+  (trendBias ==  1 ? C_BULL_BG :
+   trendBias == -1 ? C_BEAR_BG : C_NEUTRAL_BG) :
+  na
+
+bgcolor(bgCol, title = "Trend Bias Background")
+
+// ============================================================================
+// §16  STATISTICS / DASHBOARD PANEL
+// ============================================================================
+
+var table dash = na
+
+if i_showPanel
+    if na(dash)
+        dash := table.new(
+          position.top_right, 2, 16,
+          bgcolor      = C_TBL_BG,
+          border_color = C_TBL_BDR,
+          border_width = 1,
+          frame_color  = C_TBL_BDR,
+          frame_width  = 1)
+
+    // ── Helper: set a row ────────────────────────────────────────────────────
+    setRow(r, label_, value_, valCol) =>
+        table.cell(dash, 0, r, label_,
+          text_color  = C_TBL_DIM,
+          text_halign = text.align_left,
+          text_size   = size.small,
+          bgcolor     = C_TBL_HDR)
+        table.cell(dash, 1, r, value_,
+          text_color  = valCol,
+          text_halign = text.align_right,
+          text_size   = size.small,
+          bgcolor     = C_TBL_BG)
+
+    // ── Row 0: Header ────────────────────────────────────────────────────────
+    table.cell(dash, 0, 0, "MSNR + Fib Algorithm",
+      text_color  = C_TBL_TXT,
+      text_halign = text.align_center,
+      text_size   = size.small,
+      bgcolor     = color.new(#00D4A5, 70),
+      tooltip     = "Institutional SMC + Fibonacci Confluence System v3.0")
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    // ── Row 1: Trend Bias ────────────────────────────────────────────────────
+    biasStr = trendBias ==  1 ? "▲ Bullish" :
+              trendBias == -1 ? "▼ Bearish" : "◈ Neutral"
+    biasCol = trendBias ==  1 ? C_TBL_BULL :
+              trendBias == -1 ? C_TBL_BEAR : C_TBL_DIM
+    setRow(1, "Trend Bias", biasStr, biasCol)
+
+    // ── Row 2: Bull Confluence Score ─────────────────────────────────────────
+    setRow(2, "Bull Confluence", str.tostring(score_bull) + " / 6",
+      score_bull >= i_minConf ? C_TBL_BULL : C_TBL_WARN)
+
+    // ── Row 3: Bear Confluence Score ─────────────────────────────────────────
+    setRow(3, "Bear Confluence", str.tostring(score_bear) + " / 6",
+      score_bear >= i_minConf ? C_TBL_BEAR : C_TBL_WARN)
+
+    // ── Row 4: Structure Status ───────────────────────────────────────────────
+    structStr = (bosLong or mssLong) ? "BOS/MSS Bull ▲" :
+                (bosShort or mssShort) ? "BOS/MSS Bear ▼" : "No New Structure"
+    structCol = (bosLong or mssLong) ? C_TBL_BULL :
+                (bosShort or mssShort) ? C_TBL_BEAR : C_TBL_DIM
+    setRow(4, "Structure", structStr, structCol)
+
+    // ── Row 5: Liquidity Status ───────────────────────────────────────────────
+    liqStr = liqSweepBull ? "Swept Lows 💧" :
+             liqSweepBear ? "Swept Highs 💧" : "Not Swept"
+    liqCol = (liqSweepBull or liqSweepBear) ? C_TBL_WARN : C_TBL_DIM
+    setRow(5, "Liquidity", liqStr, liqCol)
+
+    // ── Row 6: Nearest Fib Level ──────────────────────────────────────────────
+    fibNearStr = nearestFibName + "  (" +
+                 str.tostring(math.round(nearestFibDist * 100) / 100) + "%)"
+    fibNearCol = nearestFibDist <= 0.25 ? C_TBL_WARN : C_TBL_DIM
+    setRow(6, "Nearest Fib", fibNearStr, fibNearCol)
+
+    // ── Row 7: Order Block Status ─────────────────────────────────────────────
+    obStr = c5_bull ? "Inside Bull OB" : c5_bear ? "Inside Bear OB" : "No OB Touch"
+    obCol = c5_bull ? C_TBL_BULL : c5_bear ? C_TBL_BEAR : C_TBL_DIM
+    setRow(7, "Order Block", obStr, obCol)
+
+    // ── Row 8: Win Probability ────────────────────────────────────────────────
+    winProb = trendBias == 1 ? winProb_bull :
+              trendBias == -1 ? winProb_bear : 50
+    winCol  = winProb >= 70 ? C_TBL_BULL :
+              winProb >= 55 ? C_TBL_WARN : C_TBL_BEAR
+    setRow(8, "Win Probability", str.tostring(winProb) + " %", winCol)
+
+    // ── Row 9: Suggested RR ───────────────────────────────────────────────────
+    rrVal = trendBias == 1 ? rrStr(score_bull) : rrStr(score_bear)
+    setRow(9, "Suggested RR", rrVal, C_TBL_TXT)
+
+    // ── Row 10: Active Ghost Setups ───────────────────────────────────────────
+    ghostTotal = (isGhostLong ? 1 : 0) + (isGhostShort ? 1 : 0)
+    setRow(10, "Ghost Setups", str.tostring(ghostTotal),
+      ghostTotal > 0 ? C_TBL_WARN : C_TBL_DIM)
+
+    // ── Row 11: ATR (Volatility) ──────────────────────────────────────────────
+    setRow(11, "ATR-14", str.tostring(math.round(atr14 * 10000) / 10000), C_TBL_TXT)
+
+    // ── Row 12: SL Distance ───────────────────────────────────────────────────
+    slDist = trendBias == 1 ? math.abs(close - slLong) :
+             trendBias == -1 ? math.abs(close - slShort) : 0.0
+    slDistPct = slDist / close * 100
+    setRow(12, "SL Distance", str.tostring(math.round(slDistPct * 100) / 100) + " %",
+      slDistPct > 2.0 ? C_TBL_BEAR : C_TBL_WARN)
+
+    // ── Row 13: Position Size Suggestion ─────────────────────────────────────
+    posEntry = close
+    posSL    = trendBias == 1 ? slLong : slShort
+    posSize  = calcPosSize(posEntry, posSL)
+    posSizeStr = slDist > 0 ?
+      str.tostring(math.round(posSize * 100) / 100) + " units" : "—"
+    setRow(13, "Position Size (" + str.tostring(i_riskPct) + "% risk)",
+      posSizeStr, C_TBL_TXT)
+
+    // ── Row 14: Risk Amount ───────────────────────────────────────────────────
+    riskAmt = math.round(i_accountSize * i_riskPct / 100 * 100) / 100
+    setRow(14, "Max Risk ($)", "$ " + str.tostring(riskAmt), C_TBL_WARN)
+
+    // ── Row 15: Timestamp ─────────────────────────────────────────────────────
+    setRow(15, "Last Update",
+      str.format_time(timenow, "HH:mm:ss", "UTC"),
+      C_TBL_DIM)
+
+// ============================================================================
+// §17  ALERTS
+// ============================================================================
+
+// Ghost long
+alertcondition(isGhostLong,
+  title   = "MSNR Ghost Long Setup",
+  message = "🟡 MSNR Ghost Long Setup Detected — Score: {{plot_0}}/6 | Ticker: {{ticker}} | TF: {{interval}}")
+
+// Ghost short
+alertcondition(isGhostShort,
+  title   = "MSNR Ghost Short Setup",
+  message = "🟡 MSNR Ghost Short Setup Detected — Score: {{plot_1}}/6 | Ticker: {{ticker}} | TF: {{interval}}")
+
+// Confirmed long
+alertcondition(isConfirmLong,
+  title   = "MSNR + Fib Confirmed LONG",
+  message = "✅ MSNR + Fib Confirmed LONG Entry — Score: {{plot_0}}/6 | Price: {{close}} | Ticker: {{ticker}} | TF: {{interval}}")
+
+// Confirmed short
+alertcondition(isConfirmShort,
+  title   = "MSNR + Fib Confirmed SHORT",
+  message = "✅ MSNR + Fib Confirmed SHORT Entry — Score: {{plot_1}}/6 | Price: {{close}} | Ticker: {{ticker}} | TF: {{interval}}")
+
+// BOS alerts
+alertcondition(bosLong,
+  title   = "BOS Bullish Break",
+  message = "📈 Bullish Break of Structure (BOS) | {{ticker}} | {{interval}}")
+
+alertcondition(bosShort,
+  title   = "BOS Bearish Break",
+  message = "📉 Bearish Break of Structure (BOS) | {{ticker}} | {{interval}}")
+
+// Liquidity sweep alerts
+alertcondition(liqSweepBull,
+  title   = "Liquidity Sweep (Lows)",
+  message = "💧 Buy-side Liquidity Sweep Detected | {{ticker}} | {{interval}}")
+
+alertcondition(liqSweepBear,
+  title   = "Liquidity Sweep (Highs)",
+  message = "💧 Sell-side Liquidity Sweep Detected | {{ticker}} | {{interval}}")
+
+// ── Invisible plot() exports for alert {{plot}} references ──────────────────
+plot(score_bull, "Bull Score", display = display.none)
+plot(score_bear, "Bear Score", display = display.none)
+
+// ── Visual candle overlay markers (arrow series — non-repainting) ────────────
+plotshape(isConfirmLong,  title = "Confirmed Long",  style = shape.triangleup,
+  location = location.belowbar, color = C_BULL,  size = size.small)
+plotshape(isConfirmShort, title = "Confirmed Short", style = shape.triangledown,
+  location = location.abovebar, color = C_BEAR,  size = size.small)
+plotshape(isGhostLong,    title = "Ghost Long",      style = shape.circle,
+  location = location.belowbar, color = C_BULL_GHOST, size = size.tiny)
+plotshape(isGhostShort,   title = "Ghost Short",     style = shape.circle,
+  location = location.abovebar, color = C_BEAR_GHOST, size = size.tiny)
+
+// ── Swing high / low dots ────────────────────────────────────────────────────
+plotshape(not na(swH) and i_showSMC, title = "Swing High",
+  style = shape.diamond, location = location.abovebar,
+  color = color.new(#FF4757, 40), size = size.tiny)
+plotshape(not na(swL) and i_showSMC, title = "Swing Low",
+  style = shape.diamond, location = location.belowbar,
+  color = color.new(#00D4A5, 40), size = size.tiny)
+
+// ============================================================================
+// END OF SCRIPT
+// ============================================================================
