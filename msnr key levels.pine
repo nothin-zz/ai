@@ -1,0 +1,359 @@
+//@version=5
+indicator("MSNR Key Levels — Phoenix FX", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200)
+
+// ═══════════════════════════════════════════════════════════════
+//  MSNR STRATEGY — Phoenix FX
+//  KEY LEVELS extended into future + Entry alerts when price arrives
+// ═══════════════════════════════════════════════════════════════
+
+// ─── SETTINGS ────────────────────────────────────────────────
+grp1 = "═══ Key Level Settings ═══"
+swing_len     = input.int(10,  "Swing Length",          minval=3,  maxval=50,  group=grp1)
+extend_bars   = input.int(100, "Extend Level (bars →)", minval=20, maxval=500, group=grp1)
+show_key      = input.bool(true,"Show KEY Levels",                              group=grp1)
+show_irl      = input.bool(true,"Show IRL (Internal Range LQ)",                group=grp1)
+show_turtle   = input.bool(true,"Show Turtle Soup / TS",                       group=grp1)
+show_qml      = input.bool(true,"Show Quasi-Modo Level",                       group=grp1)
+
+grp2 = "═══ Structure ═══"
+show_bos      = input.bool(true,"Show BOS",   group=grp2)
+show_mss      = input.bool(true,"Show MSS",   group=grp2)
+
+grp3 = "═══ Signal ═══"
+show_signals  = input.bool(true,"Show Entry Signals",         group=grp3)
+sl_pts        = input.float(10, "SL (pts beyond wick)",       group=grp3, minval=1)
+tp1_r         = input.float(1.5,"TP1 R multiplier",           group=grp3)
+tp2_r         = input.float(2.5,"TP2 R multiplier",           group=grp3)
+tp3_r         = input.float(4.0,"TP3 R multiplier",           group=grp3)
+
+grp4 = "═══ Colors ═══"
+col_key       = input.color(color.new(#00d4ff, 0),  "KEY Level",    group=grp4)
+col_irl       = input.color(color.new(#f0b429, 0),  "IRL Level",    group=grp4)
+col_ts        = input.color(color.new(#ff3d5a, 0),  "TS / Turtle",  group=grp4)
+col_qml       = input.color(color.new(#9b59b6, 0),  "QML Level",    group=grp4)
+col_bull      = input.color(color.new(#00ff88, 0),  "Bullish",      group=grp4)
+col_bear      = input.color(color.new(#ff3d5a, 0),  "Bearish",      group=grp4)
+
+// ─── PIVOT DETECTION ─────────────────────────────────────────
+ph = ta.pivothigh(high, swing_len, swing_len)
+pl = ta.pivotlow (low,  swing_len, swing_len)
+
+// ─── TRACK LAST 3 SWING HIGHS & LOWS ─────────────────────────
+var float[] phVals = array.new_float(0)
+var int[]   phBars = array.new_int(0)
+var float[] plVals = array.new_float(0)
+var int[]   plBars = array.new_int(0)
+
+if not na(ph)
+    array.unshift(phVals, ph)
+    array.unshift(phBars, bar_index - swing_len)
+    if array.size(phVals) > 5
+        array.pop(phVals)
+        array.pop(phBars)
+
+if not na(pl)
+    array.unshift(plVals, pl)
+    array.unshift(plBars, bar_index - swing_len)
+    if array.size(plVals) > 5
+        array.pop(plVals)
+        array.pop(plBars)
+
+// ─── KEY LEVEL LINES (extended into future) ───────────────────
+// Draw KEY lines from each swing pivot extending to the right
+var line[] keyLines   = array.new_line(0)
+var label[] keyLabels = array.new_label(0)
+
+// Clean old lines/labels (keep max 10 each)
+cleanLines() =>
+    while array.size(keyLines) > 10
+        line.delete(array.shift(keyLines))
+while array.size(keyLabels) > 10
+    label.delete(array.shift(keyLabels))
+
+if show_key and not na(ph)
+    cleanLines()
+    // Draw KEY high level
+    ln = line.new(bar_index - swing_len, ph, bar_index + extend_bars, ph,
+      color=col_key, width=1, style=line.style_solid, extend=extend.none)
+    array.push(keyLines, ln)
+    lb = label.new(bar_index + extend_bars, ph, "KEY",
+      style=label.style_label_left, color=color.new(col_key, 80),
+      textcolor=col_key, size=size.small)
+    array.push(keyLabels, lb)
+
+if show_key and not na(pl)
+    cleanLines()
+    // Draw KEY low level
+    ln = line.new(bar_index - swing_len, pl, bar_index + extend_bars, pl,
+      color=col_key, width=1, style=line.style_solid, extend=extend.none)
+    array.push(keyLines, ln)
+    lb = label.new(bar_index + extend_bars, pl, "KEY",
+      style=label.style_label_left, color=color.new(col_key, 80),
+      textcolor=col_key, size=size.small)
+    array.push(keyLabels, lb)
+
+// ─── IRL — Internal Range Liquidity ──────────────────────────
+// IRL = midpoint between last swing high and last swing low
+var float irlVal  = na
+var line  irlLine = na
+var label irlLbl  = na
+
+if array.size(phVals) > 0 and array.size(plVals) > 0
+    phTop = array.get(phVals, 0)
+    plBot = array.get(plVals, 0)
+    irlVal := (phTop + plBot) / 2
+
+    if show_irl and barstate.islast
+        if not na(irlLine)
+            line.delete(irlLine)
+        if not na(irlLbl)
+            label.delete(irlLbl)
+        irlLine := line.new(bar_index - 30, irlVal, bar_index + extend_bars, irlVal,
+          color=color.new(col_irl, 40), width=1,
+          style=line.style_dashed, extend=extend.none)
+        irlLbl  := label.new(bar_index + extend_bars, irlVal, "IRL",
+          style=label.style_label_left,
+          color=color.new(col_irl, 80), textcolor=col_irl, size=size.small)
+
+// ─── STRUCTURE (BOS / MSS) ────────────────────────────────────
+var float lastPH = na
+var float lastPL = na
+var int   structure = 0
+
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+bos_bull = not na(lastPH) and close > lastPH and close[1] <= lastPH
+bos_bear = not na(lastPL) and close < lastPL and close[1] >= lastPL
+
+var bool was_up   = false
+var bool was_down = false
+if bos_bull
+    was_up   := true
+    was_down := false
+    structure := 1
+if bos_bear
+    was_down := true
+    was_up   := false
+    structure := -1
+
+mss_bear = was_up   and bos_bear
+mss_bull = was_down and bos_bull
+
+if show_bos
+    if bos_bull and not mss_bull
+        label.new(bar_index, low  - (high-low)*0.3, "BOS",
+          style=label.style_label_up,
+          color=col_bull, textcolor=color.black, size=size.small)
+    if bos_bear and not mss_bear
+        label.new(bar_index, high + (high-low)*0.3, "BOS",
+          style=label.style_label_down,
+          color=col_bear, textcolor=color.white, size=size.small)
+
+if show_mss
+    if mss_bear
+        label.new(bar_index, high + (high-low)*0.5, "MSS ▼",
+          style=label.style_label_down,
+          color=color.new(#ff3d5a, 0), textcolor=color.white, size=size.normal)
+    if mss_bull
+        label.new(bar_index, low  - (high-low)*0.5, "MSS ▲",
+          style=label.style_label_up,
+          color=color.new(#00ff88, 0), textcolor=color.black, size=size.normal)
+
+// ─── TURTLE SOUP / TS ────────────────────────────────────────
+// Turtle Soup: price sweeps beyond swing high/low then reverses same bar
+ts_bear = not na(lastPH) and high > lastPH and close < lastPH
+ts_bull = not na(lastPL) and low  < lastPL and close > lastPL
+
+if show_turtle
+    if ts_bear
+        label.new(bar_index, high + (high-low)*0.1,
+          "TURTLE\nSOUP ↓", style=label.style_label_down,
+          color=color.new(col_ts, 0), textcolor=color.white, size=size.small)
+    if ts_bull
+        label.new(bar_index, low  - (high-low)*0.1,
+          "TURTLE\nSOUP ↑", style=label.style_label_up,
+          color=color.new(col_bull, 0), textcolor=color.black, size=size.small)
+
+// ─── QUASI-MODO LEVEL (QML) ───────────────────────────────────
+// QML = previous BOS level that now acts as support/resistance
+var float qmlHigh = na
+var float qmlLow  = na
+var line  qmlHLine = na
+var line  qmlLLine = na
+
+if not na(ph) and array.size(phVals) >= 2
+    qmlHigh := array.get(phVals, 1)   // second last swing high
+    if show_qml
+        if not na(qmlHLine)
+            line.delete(qmlHLine)
+        qmlHLine := line.new(bar_index - swing_len, qmlHigh,
+          bar_index + extend_bars, qmlHigh,
+          color=color.new(col_qml, 30), width=1,
+          style=line.style_dotted, extend=extend.none)
+        label.new(bar_index + extend_bars, qmlHigh, "QML",
+          style=label.style_label_left,
+          color=color.new(col_qml, 80), textcolor=col_qml, size=size.tiny)
+
+if not na(pl) and array.size(plVals) >= 2
+    qmlLow := array.get(plVals, 1)    // second last swing low
+    if show_qml
+        if not na(qmlLLine)
+            line.delete(qmlLLine)
+        qmlLLine := line.new(bar_index - swing_len, qmlLow,
+          bar_index + extend_bars, qmlLow,
+          color=color.new(col_qml, 30), width=1,
+          style=line.style_dotted, extend=extend.none)
+        label.new(bar_index + extend_bars, qmlLow, "QML",
+          style=label.style_label_left,
+          color=color.new(col_qml, 80), textcolor=col_qml, size=size.tiny)
+
+// ─── PRICE ARRIVES AT KEY LEVEL ───────────────────────────────
+// This is the core: detect when price TOUCHES a KEY level
+// and structure confirms → generate entry signal
+
+touchThresh = syminfo.mintick * 10   // tolerance
+
+// Price touches KEY high level (potential SELL zone)
+keyHighTouch(lvl) =>
+    not na(lvl) and high >= lvl - touchThresh and low <= lvl + touchThresh
+
+// Price touches KEY low level (potential BUY zone)
+keyLowTouch(lvl) =>
+    not na(lvl) and low <= lvl + touchThresh and high >= lvl - touchThresh
+
+// Get current KEY levels
+keyHigh = array.size(phVals) > 0 ? array.get(phVals, 0) : na
+keyLow  = array.size(plVals) > 0 ? array.get(plVals, 0) : na
+
+// ─── DOJI ────────────────────────────────────────────────────
+doji_thresh = input.float(0.25, "Doji Body %", minval=0.05, maxval=0.5, group=grp2)
+bodyPct = math.abs(close - open) / math.max(high - low, syminfo.mintick)
+isDoji  = bodyPct <= doji_thresh
+
+// ─── MSNR ENTRY SIGNALS ───────────────────────────────────────
+// SELL: price arrives at KEY high + (MSS or TS or Doji)
+sell_at_key = keyHighTouch(keyHigh) and (mss_bear or ts_bear or isDoji) and structure != 1
+
+// BUY: price arrives at KEY low + (MSS or TS or Doji)
+buy_at_key  = keyLowTouch(keyLow)  and (mss_bull or ts_bull or isDoji) and structure != -1
+
+// Also trigger at QML
+sell_at_qml = not na(qmlHigh) and keyHighTouch(qmlHigh) and (mss_bear or ts_bear)
+buy_at_qml  = not na(qmlLow)  and keyLowTouch(qmlLow)   and (mss_bull or ts_bull)
+
+// Also trigger at IRL
+sell_at_irl = not na(irlVal) and high >= irlVal - touchThresh and close < irlVal and structure == -1
+buy_at_irl  = not na(irlVal) and low  <= irlVal + touchThresh and close > irlVal and structure == 1
+
+anySell = sell_at_key or sell_at_qml or sell_at_irl
+anyBuy  = buy_at_key  or buy_at_qml  or buy_at_irl
+
+// ─── ENTRY LABELS ────────────────────────────────────────────
+if show_signals and anySell
+    reason = sell_at_key ? "KEY" : sell_at_qml ? "QML" : "IRL"
+    conf   = (mss_bear ? 1 : 0) + (ts_bear ? 1 : 0) + (isDoji ? 1 : 0)
+    stars  = conf >= 2 ? "★★" : "★"
+    label.new(bar_index, high + (high-low)*0.6,
+      stars + " SELL\n" + reason,
+      style=label.style_label_down,
+      color=#ff3d5a, textcolor=color.white, size=size.normal)
+
+if show_signals and anyBuy
+    reason = buy_at_key ? "KEY" : buy_at_qml ? "QML" : "IRL"
+    conf   = (mss_bull ? 1 : 0) + (ts_bull ? 1 : 0) + (isDoji ? 1 : 0)
+    stars  = conf >= 2 ? "★★" : "★"
+    label.new(bar_index, low - (high-low)*0.6,
+      stars + " BUY\n" + reason,
+      style=label.style_label_up,
+      color=#00ff88, textcolor=color.black, size=size.normal)
+
+// ─── SL / TP AUTO LINES ───────────────────────────────────────
+if show_signals and anySell
+    sl  = high + sl_pts
+    rsk = sl - close
+    t1  = close - rsk * tp1_r
+    t2  = close - rsk * tp2_r
+    t3  = close - rsk * tp3_r
+    line.new(bar_index, sl, bar_index + 40, sl,  color=color.new(#ff3d5a,0), width=1)
+    line.new(bar_index, t1, bar_index + 40, t1,  color=color.new(#00ff88,0), width=1, style=line.style_dashed)
+    line.new(bar_index, t2, bar_index + 40, t2,  color=color.new(#00ff88,0), width=1, style=line.style_dashed)
+    line.new(bar_index, t3, bar_index + 40, t3,  color=color.new(#f0b429,0), width=1, style=line.style_dotted)
+    label.new(bar_index+40, sl, "SL",  style=label.style_label_left, color=color.new(#ff3d5a,80), textcolor=#ff3d5a, size=size.tiny)
+    label.new(bar_index+40, t1, "TP1", style=label.style_label_left, color=color.new(#00ff88,80), textcolor=#00ff88, size=size.tiny)
+    label.new(bar_index+40, t2, "TP2", style=label.style_label_left, color=color.new(#00ff88,80), textcolor=#00ff88, size=size.tiny)
+    label.new(bar_index+40, t3, "TP3", style=label.style_label_left, color=color.new(#f0b429,80), textcolor=#f0b429, size=size.tiny)
+
+if show_signals and anyBuy
+    sl  = low - sl_pts
+    rsk = close - sl
+    t1  = close + rsk * tp1_r
+    t2  = close + rsk * tp2_r
+    t3  = close + rsk * tp3_r
+    line.new(bar_index, sl, bar_index + 40, sl,  color=color.new(#ff3d5a,0), width=1)
+    line.new(bar_index, t1, bar_index + 40, t1,  color=color.new(#00ff88,0), width=1, style=line.style_dashed)
+    line.new(bar_index, t2, bar_index + 40, t2,  color=color.new(#00ff88,0), width=1, style=line.style_dashed)
+    line.new(bar_index, t3, bar_index + 40, t3,  color=color.new(#f0b429,0), width=1, style=line.style_dotted)
+    label.new(bar_index+40, sl, "SL",  style=label.style_label_left, color=color.new(#ff3d5a,80), textcolor=#ff3d5a, size=size.tiny)
+    label.new(bar_index+40, t1, "TP1", style=label.style_label_left, color=color.new(#00ff88,80), textcolor=#00ff88, size=size.tiny)
+    label.new(bar_index+40, t2, "TP2", style=label.style_label_left, color=color.new(#00ff88,80), textcolor=#00ff88, size=size.tiny)
+    label.new(bar_index+40, t3, "TP3", style=label.style_label_left, color=color.new(#f0b429,80), textcolor=#f0b429, size=size.tiny)
+
+// ─── BACKGROUND BIAS ─────────────────────────────────────────
+bgcolor(structure == 1 ? color.new(#00ff88,97) : structure == -1 ? color.new(#ff3d5a,97) : na)
+
+// ─── INFO TABLE ──────────────────────────────────────────────
+var table t = table.new(position.top_right, 2, 9,
+  bgcolor=color.new(#050508,5),
+  border_color=color.new(#1a1f2e,0), border_width=1,
+  frame_color=color.new(#f0b429,50), frame_width=1)
+
+if barstate.islast
+    table.cell(t,0,0,"MSNR · Phoenix FX",
+      text_color=#f0b429, text_size=size.small,
+      bgcolor=color.new(#0e1018,0), text_halign=text.align_center)
+    table.merge_cells(t,0,0,1,0)
+
+    table.cell(t,0,1,"Bias",     text_color=color.new(color.white,50), text_size=size.tiny)
+    table.cell(t,1,1, structure==1?"BULLISH":structure==-1?"BEARISH":"NEUTRAL",
+      text_color=structure==1?#00ff88:structure==-1?#ff3d5a:#f0b429, text_size=size.small)
+
+    table.cell(t,0,2,"KEY High", text_color=color.new(color.white,50), text_size=size.tiny)
+    table.cell(t,1,2, not na(keyHigh) ? str.tostring(keyHigh,"#.##") : "—",
+      text_color=#00d4ff, text_size=size.tiny)
+
+    table.cell(t,0,3,"KEY Low",  text_color=color.new(color.white,50), text_size=size.tiny)
+    table.cell(t,1,3, not na(keyLow) ? str.tostring(keyLow,"#.##") : "—",
+      text_color=#00d4ff, text_size=size.tiny)
+
+    table.cell(t,0,4,"IRL",      text_color=color.new(color.white,50), text_size=size.tiny)
+    table.cell(t,1,4, not na(irlVal) ? str.tostring(irlVal,"#.##") : "—",
+      text_color=#f0b429, text_size=size.tiny)
+
+    table.cell(t,0,5,"MSS",      text_color=color.new(color.white,50), text_size=size.tiny)
+    table.cell(t,1,5, mss_bull?"↑ BULL":mss_bear?"↓ BEAR":"—",
+      text_color=mss_bull?#00ff88:mss_bear?#ff3d5a:color.gray, text_size=size.tiny)
+
+    table.cell(t,0,6,"TS",       text_color=color.new(color.white,50), text_size=size.tiny)
+    table.cell(t,1,6, ts_bull?"↑ SWEPT":ts_bear?"↓ SWEPT":"—",
+      text_color=ts_bull?#00ff88:ts_bear?#ff3d5a:color.gray, text_size=size.tiny)
+
+    table.cell(t,0,7,"Signal",   text_color=color.new(color.white,50), text_size=size.tiny)
+    table.cell(t,1,7, anySell?"🔴 SELL":anyBuy?"🟢 BUY":"WAIT",
+      text_color=anySell?#ff3d5a:anyBuy?#00ff88:#f0b429, text_size=size.small)
+
+    table.cell(t,0,8,"Doji",     text_color=color.new(color.white,50), text_size=size.tiny)
+    table.cell(t,1,8, isDoji?"✓ YES":"—",
+      text_color=isDoji?#f0b429:color.gray, text_size=size.tiny)
+
+// ─── ALERTS ──────────────────────────────────────────────────
+alertcondition(anySell,      "🔴 SELL at KEY Level", "MSNR SELL — Price at KEY/QML/IRL")
+alertcondition(anyBuy,       "🟢 BUY at KEY Level",  "MSNR BUY — Price at KEY/QML/IRL")
+alertcondition(sell_at_key,  "SELL at KEY High",     "Price reached KEY HIGH — SELL setup")
+alertcondition(buy_at_key,   "BUY at KEY Low",       "Price reached KEY LOW — BUY setup")
+alertcondition(sell_at_irl,  "SELL at IRL",          "Price at IRL — SELL")
+alertcondition(buy_at_irl,   "BUY at IRL",           "Price at IRL — BUY")
+alertcondition(ts_bear,      "Turtle Soup SELL",     "Turtle Soup bearish sweep")
+alertcondition(ts_bull,      "Turtle Soup BUY",      "Turtle Soup bullish sweep")
