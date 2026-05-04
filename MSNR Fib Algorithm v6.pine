@@ -1,0 +1,927 @@
+// ============================================================================
+// MSNR + Fib Algorithm  —  v6.0.0
+// Platform : TradingView Pine Script v5
+// Best on  : 5m · 15m · H1
+//
+// ── v6 FIXES ────────────────────────────────────────────────────────────────
+//  SYNTAX-1  ta.barstate.isconfirmed  →  barstate.isconfirmed  (no ta. prefix)
+//  SYNTAX-2  `if X then Y` single-line inside functions  →  expanded to block
+//  FIX-A     Fib bootstrap: fibBull/fibBear work from first single pivot
+//  FIX-B     FVG boxes: bounded arrays + auto-cleanup when gap is filled
+//  FIX-C     Fib Arc: draws from any single pivot, na-safe first-draw guard
+//  FIX-D     Trade boxes: one call per bar, priority rule on tie
+// ============================================================================
+
+//@version=5
+indicator(
+  title            = "MSNR + Fib Algorithm",
+  shorttitle       = "MSNR·Fib",
+  overlay          = true,
+  max_bars_back    = 500,
+  max_boxes_count  = 200,
+  max_lines_count  = 200,
+  max_labels_count = 200)
+
+// ============================================================================
+// §1  INPUTS
+// ============================================================================
+
+grp_mod = "⚙️  Module Toggles"
+i_showSMC     = input.bool  (true,     "Show SMC (BOS/MSS/OB/FVG)",        group = grp_mod)
+i_showFib     = input.bool  (true,     "Show Fibonacci Retracement",        group = grp_mod)
+i_showFibArc  = input.bool  (true,     "Show Fibonacci Circle / Arc",       group = grp_mod)
+i_showPanel   = input.bool  (true,     "Show Statistics Panel",             group = grp_mod)
+i_showGhost   = input.bool  (true,     "Show Ghost (Pre-signal) Mode",      group = grp_mod)
+i_showTP      = input.bool  (true,     "Show TP / SL Boxes",                group = grp_mod)
+i_bgBias      = input.bool  (true,     "Background Trend Bias Colour",      group = grp_mod)
+
+grp_smc = "📐  SMC Parameters"
+i_swingLen    = input.int   (10,  "Swing Lookback",       minval=3,    maxval=50,   group=grp_smc)
+i_obLookback  = input.int   (30,  "OB Lookback",          minval=5,    maxval=100,  group=grp_smc)
+i_fvgMinPct   = input.float (0.05,"Min FVG Size (%)",     minval=0.01, maxval=2.0,  step=0.01, group=grp_smc)
+i_fvgMaxBoxes = input.int   (5,   "Max FVG Boxes/side",   minval=1,    maxval=20,   group=grp_smc,
+  tooltip="Oldest FVG auto-deleted when limit reached. Keeps chart clean.")
+
+grp_fib = "📏  Fibonacci Settings"
+i_fibArcRad   = input.int   (21,  "Fib Arc Radius (bars)",minval=5,    maxval=100,  group=grp_fib)
+
+grp_sig = "🎯  Signal & Entry"
+i_minConf     = input.int   (4,      "Min Confluence (1-6)",  minval=1, maxval=6,   group=grp_sig)
+i_entryMode   = input.string("Market","Entry Mode",
+  options=["Market","Limit"], group=grp_sig,
+  tooltip="Market = enter on bar close.\nLimit = pending order at nearest 0.618/0.786 Fib level.")
+i_atrLen      = input.int   (14,     "ATR Length",            minval=5, maxval=50,  group=grp_sig)
+i_atrMult     = input.float (1.5,    "ATR SL Multiplier",     minval=0.5,maxval=5.0,step=0.1,group=grp_sig)
+i_riskPct     = input.float (1.0,    "Account Risk %",        minval=0.1,maxval=10.0,step=0.1,group=grp_sig)
+i_accountSize = input.float (10000,  "Account Size (USD)",    minval=100,            group=grp_sig)
+
+// ============================================================================
+// §2  COLOURS
+// ============================================================================
+
+C_BULL        = color.new(#00D4A5,  0)
+C_BEAR        = color.new(#FF4757,  0)
+C_BULL_GHOST  = color.new(#00D4A5, 60)
+C_BEAR_GHOST  = color.new(#FF4757, 60)
+C_BULL_BG     = color.new(#00D4A5, 93)
+C_BEAR_BG     = color.new(#FF4757, 93)
+C_NEUTRAL_BG  = color.new(#778CA3, 97)
+C_OB_BULL     = color.new(#00D4A5, 82)
+C_OB_BEAR     = color.new(#FF4757, 82)
+C_FVG_BULL    = color.new(#00D4A5, 88)
+C_FVG_BEAR    = color.new(#FF4757, 88)
+C_FIB_0618    = color.new(#F7C59F,  0)
+C_FIB_0786    = color.new(#FFD700,  0)
+C_FIB_100     = color.new(#C0C0C0,  0)
+C_FIB_1618    = color.new(#00D4A5,  0)
+C_FIB_2618    = color.new(#82E0AA,  0)
+C_FIB_3618    = color.new(#AED6F1,  0)
+C_SL          = color.new(#FF4757, 75)
+C_TP1         = color.new(#00D4A5, 75)
+C_TP2         = color.new(#00B894, 65)
+C_TP3         = color.new(#00A389, 55)
+C_LMT         = color.new(#FFD700, 35)
+C_TBL_BG      = color.new(#0D1117, 10)
+C_TBL_HDR     = color.new(#161B22,  5)
+C_TBL_BDR     = color.new(#30363D,  0)
+C_TBL_TXT     = color.new(#E6EDF3,  0)
+C_TBL_BULL    = color.new(#00D4A5,  0)
+C_TBL_BEAR    = color.new(#FF4757,  0)
+C_TBL_WARN    = color.new(#FFD700,  0)
+C_TBL_DIM     = color.new(#778CA3,  0)
+
+// ============================================================================
+// §3  HELPERS
+// ============================================================================
+
+atr14 = ta.atr(i_atrLen)
+pctDist(a, b)    => math.abs(a - b) / b * 100.0
+clamp(v, lo, hi) => math.max(lo, math.min(hi, v))
+
+// ============================================================================
+// §4  SWING HIGH / LOW  (zero-repaint via ta.pivothigh/pivotlow)
+// ============================================================================
+
+swH = ta.pivothigh(high, i_swingLen, i_swingLen)
+swL = ta.pivotlow (low,  i_swingLen, i_swingLen)
+
+var float lastSwH_price = na
+var int   lastSwH_bar   = na
+var float lastSwL_price = na
+var int   lastSwL_bar   = na
+var float prevSwH_price = na
+var float prevSwL_price = na
+
+if not na(swH)
+    prevSwH_price := lastSwH_price          // keep one step behind for BOS
+    lastSwH_price := swH
+    lastSwH_bar   := bar_index - i_swingLen
+
+if not na(swL)
+    prevSwL_price := lastSwL_price
+    lastSwL_price := swL
+    lastSwL_bar   := bar_index - i_swingLen
+
+// ============================================================================
+// §5  MARKET STRUCTURE — BOS & MSS
+// ── SYNTAX-1: barstate.isconfirmed  (NOT ta.barstate.isconfirmed)
+// ============================================================================
+
+var bool hasBOS_Bull = false
+var bool hasBOS_Bear = false
+var bool hasMSS_Bull = false
+var bool hasMSS_Bear = false
+
+// Reset flags every confirmed bar so score never accumulates stale history
+if barstate.isconfirmed
+    hasBOS_Bull := false
+    hasBOS_Bear := false
+    hasMSS_Bull := false
+    hasMSS_Bear := false
+
+bosLong  = barstate.isconfirmed and not na(prevSwH_price) and
+           close > prevSwH_price and close[1] <= prevSwH_price
+
+bosShort = barstate.isconfirmed and not na(prevSwL_price) and
+           close < prevSwL_price and close[1] >= prevSwL_price
+
+mssLong  = barstate.isconfirmed and not na(prevSwL_price) and
+           low < prevSwL_price and close > prevSwL_price
+
+mssShort = barstate.isconfirmed and not na(prevSwH_price) and
+           high > prevSwH_price and close < prevSwH_price
+
+// ── SYNTAX-2: expanded block form (no single-line `if X then Y`) ────────────
+if bosLong
+    hasBOS_Bull := true
+if bosShort
+    hasBOS_Bear := true
+if mssLong
+    hasMSS_Bull := true
+if mssShort
+    hasMSS_Bear := true
+
+if i_showSMC
+    if bosLong
+        label.new(bar_index, low  - atr14*0.6, "BOS ▲",
+          color=C_BULL, textcolor=color.white,
+          style=label.style_label_up, size=size.tiny)
+    if bosShort
+        label.new(bar_index, high + atr14*0.6, "BOS ▼",
+          color=C_BEAR, textcolor=color.white,
+          style=label.style_label_down, size=size.tiny)
+    if mssLong
+        label.new(bar_index, low  - atr14*1.1, "MSS ▲",
+          color=C_BULL, textcolor=color.black,
+          style=label.style_label_up, size=size.tiny)
+    if mssShort
+        label.new(bar_index, high + atr14*1.1, "MSS ▼",
+          color=C_BEAR, textcolor=color.black,
+          style=label.style_label_down, size=size.tiny)
+
+// ============================================================================
+// §6  LIQUIDITY SWEEP
+// ============================================================================
+
+var bool hasLiqBull = false
+var bool hasLiqBear = false
+
+if barstate.isconfirmed
+    hasLiqBull := false
+    hasLiqBear := false
+
+liqSweepBull = barstate.isconfirmed and not na(prevSwL_price) and
+               low < prevSwL_price and close > prevSwL_price
+
+liqSweepBear = barstate.isconfirmed and not na(prevSwH_price) and
+               high > prevSwH_price and close < prevSwH_price
+
+if liqSweepBull
+    hasLiqBull := true
+if liqSweepBear
+    hasLiqBear := true
+
+if i_showSMC
+    if liqSweepBull
+        label.new(bar_index, low  - atr14*1.7, "💧",
+          color=color.new(#00BCD4,15), textcolor=color.white,
+          style=label.style_label_up, size=size.tiny)
+    if liqSweepBear
+        label.new(bar_index, high + atr14*1.7, "💧",
+          color=color.new(#00BCD4,15), textcolor=color.white,
+          style=label.style_label_down, size=size.tiny)
+
+// ============================================================================
+// §7  ORDER BLOCKS
+// ============================================================================
+
+var float obBullTop = na,  var float obBullBot = na
+var float obBearTop = na,  var float obBearBot = na
+var box   obBullBox = na
+var box   obBearBox = na
+
+if bosLong and i_showSMC
+    for i = 1 to i_obLookback
+        if close[i] < open[i]
+            obBullTop := math.max(open[i], close[i])
+            obBullBot := math.min(open[i], close[i])
+            if not na(obBullBox)
+                box.delete(obBullBox)
+            obBullBox := box.new(
+              bar_index-i, obBullTop, bar_index+30, obBullBot,
+              border_color=C_BULL, border_width=1, bgcolor=C_OB_BULL)
+            break
+
+if bosShort and i_showSMC
+    for i = 1 to i_obLookback
+        if close[i] > open[i]
+            obBearTop := math.max(open[i], close[i])
+            obBearBot := math.min(open[i], close[i])
+            if not na(obBearBox)
+                box.delete(obBearBox)
+            obBearBox := box.new(
+              bar_index-i, obBearTop, bar_index+30, obBearBot,
+              border_color=C_BEAR, border_width=1, bgcolor=C_OB_BEAR)
+            break
+
+// ============================================================================
+// §8  FAIR VALUE GAP — FIX-B: bounded arrays + auto-cleanup on fill
+// ============================================================================
+
+var box[] fvgBullArr = array.new_box()
+var box[] fvgBearArr = array.new_box()
+
+// Push new FVG box; evict oldest when array is full
+fvgPush(arr, b) =>
+    if array.size(arr) >= i_fvgMaxBoxes
+        box.delete(array.shift(arr))
+    array.push(arr, b)
+
+// Walk array and delete boxes where price has closed through the gap
+fvgClean(arr, isBull) =>
+    sz = array.size(arr)
+    if sz > 0
+        i = 0
+        while i < array.size(arr)
+            b      = array.get(arr, i)
+            bTop   = box.get_top(b)
+            bBot   = box.get_bottom(b)
+            filled = isBull ? (low <= bBot) : (high >= bTop)
+            if filled
+                box.delete(b)
+                array.remove(arr, i)
+            else
+                i += 1
+
+if barstate.isconfirmed
+    fvgClean(fvgBullArr, true)
+    fvgClean(fvgBearArr, false)
+
+fvgBull = barstate.isconfirmed and
+          low > high[2] and
+          (low - high[2]) / close * 100 >= i_fvgMinPct
+
+fvgBear = barstate.isconfirmed and
+          high < low[2] and
+          (low[2] - high) / close * 100 >= i_fvgMinPct
+
+if i_showSMC
+    if fvgBull
+        nb = box.new(bar_index-2, low, bar_index+20, high[2],
+          border_color=C_BULL_GHOST, bgcolor=C_FVG_BULL,
+          border_width=1, border_style=line.style_dotted)
+        fvgPush(fvgBullArr, nb)
+    if fvgBear
+        nb = box.new(bar_index-2, low[2], bar_index+20, high,
+          border_color=C_BEAR_GHOST, bgcolor=C_FVG_BEAR,
+          border_width=1, border_style=line.style_dotted)
+        fvgPush(fvgBearArr, nb)
+
+// ============================================================================
+// §9  OCL & DOJI
+// ============================================================================
+
+bodyPct    = math.abs(close - open) / (high - low + 0.000001) * 100.0
+isDoji     = barstate.isconfirmed and bodyPct <= 10.0
+isOCL_Bull = barstate.isconfirmed and low < low[1] and high > high[1] and close > open
+isOCL_Bear = barstate.isconfirmed and low < low[1] and high > high[1] and close < open
+
+if i_showSMC
+    if isDoji
+        label.new(bar_index, high + atr14*0.3, "✦",
+          color=color.new(#FFD700,20), textcolor=color.black,
+          style=label.style_label_down, size=size.tiny,
+          tooltip="Doji — indecision / potential reversal")
+    if isOCL_Bull
+        label.new(bar_index, low - atr14*0.3, "OCL",
+          color=C_BULL_GHOST, textcolor=color.white,
+          style=label.style_label_up, size=size.tiny)
+    if isOCL_Bear
+        label.new(bar_index, high + atr14*0.3, "OCL",
+          color=C_BEAR_GHOST, textcolor=color.white,
+          style=label.style_label_down, size=size.tiny)
+
+// ============================================================================
+// §10  FIBONACCI — FIX-A: single-pivot bootstrap + fibReady guard
+// ============================================================================
+//
+//  lastPivotType tracks which pivot arrived LAST:
+//    1  = last confirmed pivot was a HIGH  → fibBull = true (retrace down, look long)
+//   -1  = last confirmed pivot was a LOW   → fibBear = true (retrace up,  look short)
+//    0  = no pivot seen yet
+//
+//  fibReady = both fibHigh and fibLow exist AND fibHigh > fibLow
+//  All level calculations are guarded by fibReady.
+
+var float fibHigh       = na
+var float fibLow        = na
+var int   lastPivotType = 0
+var bool  fibBull       = false
+var bool  fibBear       = false
+
+// Update anchors immediately when any new pivot is confirmed — FIX-A
+if not na(swH)
+    fibHigh       := swH
+    lastPivotType := 1
+    fibBull       := true
+    fibBear       := false
+
+if not na(swL)
+    fibLow        := swL
+    lastPivotType := -1
+    fibBull       := false
+    fibBear       := true
+
+// Guard: only use levels when both anchors are valid and range is positive
+fibReady = not na(fibHigh) and not na(fibLow) and fibHigh > fibLow
+fibRange = fibReady ? fibHigh - fibLow : na
+
+// ── Retracement levels ──────────────────────────────────────────────────────
+//  fibBull (last pivot = HIGH): retracement goes downward toward fibLow
+//    0.618 level = fibHigh - range * 0.618
+//    0.786 level = fibHigh - range * 0.786
+//    1.000 level = fibLow
+//  fibBear (last pivot = LOW): retracement goes upward toward fibHigh
+//    0.618 level = fibLow + range * 0.618
+//    0.786 level = fibLow + range * 0.786
+//    1.000 level = fibHigh
+
+fib0618 = fibReady ? (fibBull ? fibHigh - fibRange*0.618 :
+                                 fibLow  + fibRange*0.618) : na
+fib0786 = fibReady ? (fibBull ? fibHigh - fibRange*0.786 :
+                                 fibLow  + fibRange*0.786) : na
+fib100  = fibReady ? (fibBull ? fibLow   : fibHigh)        : na
+
+// ── Extension levels (TP targets) ───────────────────────────────────────────
+//  Bull: projects ABOVE fibHigh
+//    1.618 ext = fibHigh + range*0.618
+//    2.618 ext = fibHigh + range*1.618
+//    3.618 ext = fibHigh + range*2.618
+//  Bear: projects BELOW fibLow  (signs flipped)
+
+fib1618 = fibReady ? (fibBull ? fibHigh + fibRange*0.618 :
+                                 fibLow  - fibRange*0.618) : na
+fib2618 = fibReady ? (fibBull ? fibHigh + fibRange*1.618 :
+                                 fibLow  - fibRange*1.618) : na
+fib3618 = fibReady ? (fibBull ? fibHigh + fibRange*2.618 :
+                                 fibLow  - fibRange*2.618) : na
+
+nearFib(lvl) => not na(lvl) and pctDist(close, lvl) <= 0.25
+atFib0618 = i_showFib and nearFib(fib0618)
+atFib0786 = i_showFib and nearFib(fib0786)
+
+// ── Fib drawing ──────────────────────────────────────────────────────────────
+var line  lFib0618   = na,  var line  lFib0786   = na
+var line  lFib100    = na,  var line  lFib1618   = na
+var line  lFib2618   = na,  var line  lFib3618   = na
+var label[] fibLbls  = array.new_label()
+
+deleteFibLabels() =>
+    while array.size(fibLbls) > 0
+        label.delete(array.pop(fibLbls))
+
+// ── SYNTAX-2 FIX: expanded block form inside function ───────────────────────
+drawFibs() =>
+    if not na(lFib0618)
+        line.delete(lFib0618)
+    if not na(lFib0786)
+        line.delete(lFib0786)
+    if not na(lFib100)
+        line.delete(lFib100)
+    if not na(lFib1618)
+        line.delete(lFib1618)
+    if not na(lFib2618)
+        line.delete(lFib2618)
+    if not na(lFib3618)
+        line.delete(lFib3618)
+    deleteFibLabels()
+
+    // Safe startBar: use whichever anchor bars are available
+    startBar = not na(lastSwH_bar) and not na(lastSwL_bar) ?
+               math.min(lastSwH_bar, lastSwL_bar) :
+               not na(lastSwH_bar) ? lastSwH_bar :
+               not na(lastSwL_bar) ? lastSwL_bar : bar_index
+    endBar = bar_index + i_fibArcRad
+
+    lFib0618 := line.new(startBar, fib0618, endBar, fib0618,
+      color=C_FIB_0618, width=1, style=line.style_dashed, extend=extend.right)
+    lFib0786 := line.new(startBar, fib0786, endBar, fib0786,
+      color=C_FIB_0786, width=1, style=line.style_dashed, extend=extend.right)
+    lFib100  := line.new(startBar, fib100,  endBar, fib100,
+      color=C_FIB_100,  width=1, style=line.style_dotted, extend=extend.right)
+    lFib1618 := line.new(startBar, fib1618, endBar, fib1618,
+      color=C_FIB_1618, width=1, style=line.style_dashed, extend=extend.right)
+    lFib2618 := line.new(startBar, fib2618, endBar, fib2618,
+      color=C_FIB_2618, width=1, style=line.style_dashed, extend=extend.right)
+    lFib3618 := line.new(startBar, fib3618, endBar, fib3618,
+      color=C_FIB_3618, width=1, style=line.style_dashed, extend=extend.right)
+
+    array.push(fibLbls, label.new(endBar, fib0618, " 0.618",
+      color=color.new(color.black,100), textcolor=C_FIB_0618,
+      style=label.style_none, size=size.tiny))
+    array.push(fibLbls, label.new(endBar, fib0786, " 0.786",
+      color=color.new(color.black,100), textcolor=C_FIB_0786,
+      style=label.style_none, size=size.tiny))
+    array.push(fibLbls, label.new(endBar, fib100,  " 1.000",
+      color=color.new(color.black,100), textcolor=C_FIB_100,
+      style=label.style_none, size=size.tiny))
+    array.push(fibLbls, label.new(endBar, fib1618, " 1.618",
+      color=color.new(color.black,100), textcolor=C_FIB_1618,
+      style=label.style_none, size=size.tiny))
+    array.push(fibLbls, label.new(endBar, fib2618, " 2.618",
+      color=color.new(color.black,100), textcolor=C_FIB_2618,
+      style=label.style_none, size=size.tiny))
+    array.push(fibLbls, label.new(endBar, fib3618, " 3.618",
+      color=color.new(color.black,100), textcolor=C_FIB_3618,
+      style=label.style_none, size=size.tiny))
+
+// Redraw only when a new pivot bar is confirmed
+var int prevSwH_snap = na
+var int prevSwL_snap = na
+
+if i_showFib and barstate.isconfirmed and fibReady
+    if lastSwH_bar != prevSwH_snap or lastSwL_bar != prevSwL_snap
+        drawFibs()
+        prevSwH_snap := lastSwH_bar
+        prevSwL_snap := lastSwL_bar
+
+// Nearest Fib for dashboard
+var float  nearestFibDist = 999.0
+var string nearestFibName = "—"
+
+nearestFibDist := 999.0
+nearestFibName := "—"
+
+if i_showFib and fibReady
+    d618  = pctDist(close, fib0618)
+    d786  = pctDist(close, fib0786)
+    d100  = pctDist(close, fib100)
+    d1618 = pctDist(close, fib1618)
+    if d618  < nearestFibDist
+        nearestFibDist := d618
+        nearestFibName := "0.618"
+    if d786  < nearestFibDist
+        nearestFibDist := d786
+        nearestFibName := "0.786"
+    if d100  < nearestFibDist
+        nearestFibDist := d100
+        nearestFibName := "1.000"
+    if d1618 < nearestFibDist
+        nearestFibDist := d1618
+        nearestFibName := "1.618"
+
+// ============================================================================
+// §11  FIBONACCI ARC — FIX-C: draws from first single pivot, na-safe
+// ============================================================================
+
+var line[] arcLines    = array.new_line()
+var int    lastArcBar  = na
+var bool   lastArcHigh = false          // ← FIX-C: was `= na` (illegal for bool)
+
+drawArc(pivBar, pivPrice, isHigh) =>
+    while array.size(arcLines) > 0
+        line.delete(array.pop(arcLines))
+    r     = atr14 * i_fibArcRad * 0.5
+    steps = 36
+    for s = 0 to steps - 1
+        a1 = math.pi * s       / steps
+        a2 = math.pi * (s + 1) / steps
+        x1 = pivBar + math.round(i_fibArcRad * math.cos(a1))
+        y1 = pivPrice + (isHigh ? -1.0 : 1.0) * r * math.sin(a1)
+        x2 = pivBar + math.round(i_fibArcRad * math.cos(a2))
+        y2 = pivPrice + (isHigh ? -1.0 : 1.0) * r * math.sin(a2)
+        array.push(arcLines,
+          line.new(x1, y1, x2, y2,
+            color=color.new(#9B59B6,50), width=1,
+            style=line.style_dotted))
+
+// FIX-C: relax condition — draw arc from any available pivot
+if i_showFibArc and barstate.isconfirmed
+    hasAny   = not na(lastSwH_bar) or not na(lastSwL_bar)
+    if hasAny
+        // Pick the most recent pivot using lastPivotType
+        useHigh  = lastPivotType >= 0    // 1 = last HIGH, 0 = none yet → default H
+        pivBar   = useHigh ? lastSwH_bar   : lastSwL_bar
+        pivPrice = useHigh ? lastSwH_price : lastSwL_price
+
+        // na-safe comparison: if lastArcBar is na → always draw on first pivot
+        needDraw = na(lastArcBar) or pivBar != lastArcBar
+        if needDraw and not na(pivBar) and not na(pivPrice)
+            drawArc(pivBar, pivPrice, useHigh)
+            lastArcBar  := pivBar
+            lastArcHigh := useHigh
+
+// ============================================================================
+// §12  CONFLUENCE SCORE
+// ============================================================================
+
+c1_bull = hasBOS_Bull
+c1_bear = hasBOS_Bear
+c2_bull = hasMSS_Bull
+c2_bear = hasMSS_Bear
+c3_bull = hasLiqBull
+c3_bear = hasLiqBear
+c4_bull = i_showFib and fibBull and fibReady and (atFib0618 or atFib0786)
+c4_bear = i_showFib and fibBear and fibReady and (atFib0618 or atFib0786)
+c5_bull = not na(obBullTop) and not na(obBullBot) and
+          close >= obBullBot and close <= obBullTop * 1.005
+c5_bear = not na(obBearTop) and not na(obBearBot) and
+          close >= obBearBot * 0.995 and close <= obBearTop
+c6_bull = isDoji or isOCL_Bull
+c6_bear = isDoji or isOCL_Bear
+
+score_bull = (c1_bull?1:0) + (c2_bull?1:0) + (c3_bull?1:0) +
+             (c4_bull?1:0) + (c5_bull?1:0) + (c6_bull?1:0)
+score_bear = (c1_bear?1:0) + (c2_bear?1:0) + (c3_bear?1:0) +
+             (c4_bear?1:0) + (c5_bear?1:0) + (c6_bear?1:0)
+
+trendBias    = score_bull > score_bear ?  1 :
+               score_bear > score_bull ? -1 : 0
+winProb_bull = math.round(clamp(score_bull / 6.0 * 78 + 12, 15, 90))
+winProb_bear = math.round(clamp(score_bear / 6.0 * 78 + 12, 15, 90))
+
+rrStr(s) =>
+    s >= 6 ? "1 : 3.5" : s >= 5 ? "1 : 3.0" :
+    s >= 4 ? "1 : 2.5" : s >= 3 ? "1 : 2.0" : "1 : 1.5"
+
+// ============================================================================
+// §13  GHOST MODE
+// ============================================================================
+
+isGhostLong    = i_showGhost and barstate.isconfirmed and
+                 score_bull >= (i_minConf - 1) and score_bull < i_minConf
+isGhostShort   = i_showGhost and barstate.isconfirmed and
+                 score_bear >= (i_minConf - 1) and score_bear < i_minConf
+isConfirmLong  = barstate.isconfirmed and score_bull >= i_minConf
+isConfirmShort = barstate.isconfirmed and score_bear >= i_minConf
+ghostTotal     = (isGhostLong?1:0) + (isGhostShort?1:0)
+
+if isGhostLong
+    label.new(bar_index, low - atr14*2.5,
+      "👻 Potential Long\n" + str.tostring(score_bull) + "/6",
+      color=C_BULL_GHOST, textcolor=color.white,
+      style=label.style_label_up, size=size.small)
+if isGhostShort
+    label.new(bar_index, high + atr14*2.5,
+      "👻 Potential Short\n" + str.tostring(score_bear) + "/6",
+      color=C_BEAR_GHOST, textcolor=color.white,
+      style=label.style_label_down, size=size.small)
+if isConfirmLong
+    label.new(bar_index, low - atr14*3.2,
+      "✅ LONG  " + str.tostring(score_bull) + "/6",
+      color=C_BULL, textcolor=color.black,
+      style=label.style_label_up, size=size.normal)
+if isConfirmShort
+    label.new(bar_index, high + atr14*3.2,
+      "✅ SHORT  " + str.tostring(score_bear) + "/6",
+      color=C_BEAR, textcolor=color.white,
+      style=label.style_label_down, size=size.normal)
+
+// ============================================================================
+// §14  ENTRY · SL · TP  —  Market + Limit modes  (FIX-D + SYNTAX-2)
+// ============================================================================
+
+slBuf   = atr14 * i_atrMult
+slLong  = not na(obBullBot) ? obBullBot - slBuf :
+          not na(lastSwL_price) ? lastSwL_price - slBuf :
+          close - slBuf * 2.0
+slShort = not na(obBearTop) ? obBearTop + slBuf :
+          not na(lastSwH_price) ? lastSwH_price + slBuf :
+          close + slBuf * 2.0
+
+// ── SYNTAX-2 FIX: `if X then Y`  →  block form inside function ──────────────
+calcTP(entry, sl, isBull) =>
+    riskD = math.abs(entry - sl)
+    tp1   = isBull ? entry + riskD*2.0 : entry - riskD*2.0
+    tp2   = isBull ? entry + riskD*3.0 : entry - riskD*3.0
+    tp3   = isBull ? entry + riskD*4.5 : entry - riskD*4.5
+    if isBull
+        if not na(fib1618) and fib1618 > entry
+            tp1 := fib1618
+        if not na(fib2618) and fib2618 > entry
+            tp2 := fib2618
+        if not na(fib3618) and fib3618 > entry
+            tp3 := fib3618
+    else
+        if not na(fib1618) and fib1618 < entry
+            tp1 := fib1618
+        if not na(fib2618) and fib2618 < entry
+            tp2 := fib2618
+        if not na(fib3618) and fib3618 < entry
+            tp3 := fib3618
+    [tp1, tp2, tp3]
+
+calcPosSize(entry, sl) =>
+    riskAmt  = i_accountSize * i_riskPct / 100.0
+    slPoints = math.abs(entry - sl)
+    slPoints > 0.0 ? riskAmt / slPoints : 0.0
+
+// Persistent trade zone handles
+var box   tbSL   = na,  var box   tbTP1  = na
+var box   tbTP2  = na,  var box   tbTP3  = na
+var label lbSL   = na,  var label lbTP1  = na
+var label lbTP2  = na,  var label lbTP3  = na
+var bool  lastTradeIsBull = true
+
+// ── SYNTAX-2 FIX: expanded block form ───────────────────────────────────────
+deleteTradeBoxes() =>
+    if not na(tbSL)
+        box.delete(tbSL)
+    if not na(tbTP1)
+        box.delete(tbTP1)
+    if not na(tbTP2)
+        box.delete(tbTP2)
+    if not na(tbTP3)
+        box.delete(tbTP3)
+    if not na(lbSL)
+        label.delete(lbSL)
+    if not na(lbTP1)
+        label.delete(lbTP1)
+    if not na(lbTP2)
+        label.delete(lbTP2)
+    if not na(lbTP3)
+        label.delete(lbTP3)
+
+drawTradeBoxes(entry, sl, isBull) =>
+    deleteTradeBoxes()
+    [tp1, tp2, tp3] = calcTP(entry, sl, isBull)
+    rr1 = math.round(math.abs(tp1-entry) / math.abs(entry-sl) * 10) / 10
+    rr2 = math.round(math.abs(tp2-entry) / math.abs(entry-sl) * 10) / 10
+    rr3 = math.round(math.abs(tp3-entry) / math.abs(entry-sl) * 10) / 10
+    xL  = bar_index
+    xR  = bar_index + 40
+    tbSL  := box.new(xL, entry, xR, sl,
+      border_color=C_BEAR, bgcolor=C_SL, border_width=1)
+    lbSL  := label.new(xR, sl, " SL",
+      color=color.new(color.black,100), textcolor=C_BEAR,
+      style=label.style_none, size=size.small)
+    tbTP1 := box.new(xL, tp1, xR, entry,
+      border_color=C_TP1, bgcolor=C_TP1, border_width=1)
+    lbTP1 := label.new(xR, tp1, " TP1 1:"+str.tostring(rr1),
+      color=color.new(color.black,100), textcolor=C_BULL,
+      style=label.style_none, size=size.small)
+    tbTP2 := box.new(xL, tp2, xR, tp1,
+      border_color=C_TP2, bgcolor=C_TP2, border_width=1)
+    lbTP2 := label.new(xR, tp2, " TP2 1:"+str.tostring(rr2),
+      color=color.new(color.black,100), textcolor=C_BULL,
+      style=label.style_none, size=size.small)
+    tbTP3 := box.new(xL, tp3, xR, tp2,
+      border_color=C_TP3, bgcolor=C_TP3, border_width=1)
+    lbTP3 := label.new(xR, tp3, " TP3 1:"+str.tostring(rr3),
+      color=color.new(color.black,100), textcolor=C_BULL,
+      style=label.style_none, size=size.small)
+
+// ── Limit order mode variables ───────────────────────────────────────────────
+var line  limitLine  = na
+var label limitLabel = na
+var float limitPrice = na
+var bool  limitIsBull = true
+var bool  limitActive = false
+
+deleteLimitOrder() =>
+    if not na(limitLine)
+        line.delete(limitLine)
+    if not na(limitLabel)
+        label.delete(limitLabel)
+    limitActive := false
+    limitPrice  := na
+
+drawLimitOrder(lvl, isBull, sl) =>
+    deleteLimitOrder()
+    limitPrice  := lvl
+    limitIsBull := isBull
+    limitActive := true
+    limitLine   := line.new(bar_index, lvl, bar_index+50, lvl,
+      color=C_LMT, width=2, style=line.style_dashed, extend=extend.right)
+    dirTxt = isBull ? "BUY LIMIT" : "SELL LIMIT"
+    limitLabel := label.new(bar_index+50, lvl,
+      " ⏳ " + dirTxt + " @ " + str.tostring(math.round(lvl*100)/100),
+      color=color.new(#FFD700,20), textcolor=color.black,
+      style=label.style_none, size=size.small)
+
+// ── FIX-D: single trade box call per bar, priority = higher score ────────────
+if i_showTP and (isConfirmLong or isConfirmShort)
+    fireBull = isConfirmLong and (not isConfirmShort or score_bull >= score_bear)
+
+    if i_entryMode == "Market"
+        // Market mode: draw boxes immediately on close
+        if fireBull
+            drawTradeBoxes(close, slLong, true)
+            lastTradeIsBull := true
+        else
+            drawTradeBoxes(close, slShort, false)
+            lastTradeIsBull := false
+
+    else
+        // Limit mode: place pending order at nearest 0.618 / 0.786 fib
+        if fireBull and fibReady
+            // Pick closer retracement level as limit
+            lvl = not na(fib0786) and pctDist(close,fib0786) < pctDist(close,fib0618) ?
+                  fib0786 : fib0618
+            drawLimitOrder(lvl, true, slLong)
+            lastTradeIsBull := true
+        else if not fireBull and fibReady
+            lvl = not na(fib0786) and pctDist(close,fib0786) < pctDist(close,fib0618) ?
+                  fib0786 : fib0618
+            drawLimitOrder(lvl, false, slShort)
+            lastTradeIsBull := false
+
+// ── Limit price hit check ────────────────────────────────────────────────────
+if limitActive and not na(limitPrice) and barstate.isconfirmed
+    hit = limitIsBull ? low <= limitPrice : high >= limitPrice
+    if hit
+        deleteLimitOrder()
+        if limitIsBull
+            drawTradeBoxes(limitPrice, slLong, true)
+        else
+            drawTradeBoxes(limitPrice, slShort, false)
+        label.new(bar_index, limitIsBull ? low - atr14*1.5 : high + atr14*1.5,
+          "🎯 LIMIT HIT",
+          color=C_LMT, textcolor=color.black,
+          style = limitIsBull ? label.style_label_up : label.style_label_down,
+          size=size.normal)
+
+// ============================================================================
+// §15  BACKGROUND
+// ============================================================================
+
+bgCol = i_bgBias ? (trendBias== 1 ? C_BULL_BG :
+                    trendBias==-1 ? C_BEAR_BG  : C_NEUTRAL_BG) : na
+bgcolor(bgCol, title="Trend Bias Background")
+
+// ============================================================================
+// §16  DASHBOARD
+// ============================================================================
+
+var table dash = na
+
+if i_showPanel
+    if na(dash)
+        dash := table.new(position.top_right, 2, 16,
+          bgcolor=C_TBL_BG, border_color=C_TBL_BDR,
+          border_width=1, frame_color=C_TBL_BDR, frame_width=1)
+
+    setRow(r, lbl, val, vc) =>
+        table.cell(dash, 0, r, lbl,
+          text_color=C_TBL_DIM, text_halign=text.align_left,
+          text_size=size.small,  bgcolor=C_TBL_HDR)
+        table.cell(dash, 1, r, val,
+          text_color=vc, text_halign=text.align_right,
+          text_size=size.small,  bgcolor=C_TBL_BG)
+
+    // Row 0: header
+    table.cell(dash, 0, 0, "MSNR + Fib  v6.0",
+      text_color=C_TBL_TXT, text_halign=text.align_center,
+      text_size=size.small, bgcolor=color.new(#00D4A5,70))
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    // Row 1: trend bias
+    biasStr = trendBias== 1 ? "▲ Bullish" : trendBias==-1 ? "▼ Bearish" : "◈ Neutral"
+    biasCol = trendBias== 1 ? C_TBL_BULL  : trendBias==-1 ? C_TBL_BEAR  : C_TBL_DIM
+    setRow(1, "Trend Bias", biasStr, biasCol)
+
+    // Row 2-3: scores
+    setRow(2, "Bull Score", str.tostring(score_bull)+"/6",
+      score_bull>=i_minConf ? C_TBL_BULL : C_TBL_WARN)
+    setRow(3, "Bear Score", str.tostring(score_bear)+"/6",
+      score_bear>=i_minConf ? C_TBL_BEAR : C_TBL_WARN)
+
+    // Row 4: structure
+    stStr = (bosLong or mssLong)  ? "BOS/MSS Bull ▲" :
+            (bosShort or mssShort) ? "BOS/MSS Bear ▼" : "No Structure"
+    stCol = (bosLong or mssLong)  ? C_TBL_BULL :
+            (bosShort or mssShort) ? C_TBL_BEAR  : C_TBL_DIM
+    setRow(4, "Structure", stStr, stCol)
+
+    // Row 5: liquidity
+    lqStr = liqSweepBull ? "Swept Lows 💧" : liqSweepBear ? "Swept Highs 💧" : "Not Swept"
+    lqCol = (liqSweepBull or liqSweepBear) ? C_TBL_WARN : C_TBL_DIM
+    setRow(5, "Liquidity", lqStr, lqCol)
+
+    // Row 6: nearest fib
+    setRow(6, "Nearest Fib",
+      nearestFibName+" ("+str.tostring(math.round(nearestFibDist*100)/100)+"%)",
+      nearestFibDist<=0.25 ? C_TBL_WARN : C_TBL_DIM)
+
+    // Row 7: OB
+    obStr = c5_bull ? "Bull OB ✓" : c5_bear ? "Bear OB ✓" : "No OB Touch"
+    obCol = c5_bull ? C_TBL_BULL  : c5_bear ? C_TBL_BEAR  : C_TBL_DIM
+    setRow(7, "Order Block", obStr, obCol)
+
+    // Row 8: win probability
+    winP = trendBias== 1 ? winProb_bull : trendBias==-1 ? winProb_bear : 50
+    winC = winP>=70 ? C_TBL_BULL : winP>=55 ? C_TBL_WARN : C_TBL_BEAR
+    setRow(8, "Win Prob", str.tostring(winP)+"%", winC)
+
+    // Row 9: RR
+    rrV = trendBias== 1 ? rrStr(score_bull) : rrStr(score_bear)
+    setRow(9, "Suggested RR", rrV, C_TBL_TXT)
+
+    // Row 10: entry mode + limit status
+    entStr = i_entryMode=="Limit" ?
+             (limitActive ? "⏳ LIMIT PENDING" : "Limit — No Signal") : "Market"
+    entCol = i_entryMode=="Limit" and limitActive ? C_TBL_WARN : C_TBL_DIM
+    setRow(10, "Entry Mode", entStr, entCol)
+
+    // Row 11: ghost count
+    setRow(11, "Ghost Setups", str.tostring(ghostTotal),
+      ghostTotal>0 ? C_TBL_WARN : C_TBL_DIM)
+
+    // Row 12: ATR
+    setRow(12, "ATR-14",
+      str.tostring(math.round(atr14*10000)/10000), C_TBL_TXT)
+
+    // Row 13: SL distance
+    slRef    = lastTradeIsBull ? slLong : slShort
+    slDist   = math.abs(close - slRef)
+    slDistPct= slDist / close * 100
+    setRow(13, "SL Distance",
+      str.tostring(math.round(slDistPct*100)/100)+"%",
+      slDistPct>2.0 ? C_TBL_BEAR : C_TBL_WARN)
+
+    // Row 14: position size
+    posSize = calcPosSize(close, slRef)
+    setRow(14, "Size ("+str.tostring(i_riskPct)+"% risk)",
+      slDist>0 ? str.tostring(math.round(posSize*100)/100)+" units" : "—",
+      C_TBL_TXT)
+
+    // Row 15: max risk $
+    riskAmt = math.round(i_accountSize * i_riskPct / 100 * 100) / 100
+    setRow(15, "Max Risk $", "$ "+str.tostring(riskAmt), C_TBL_WARN)
+
+// ============================================================================
+// §17  ALERTS
+// ============================================================================
+
+alertcondition(isGhostLong,
+  title="MSNR Ghost Long",
+  message="🟡 Ghost Long {{plot_0}}/6 | {{ticker}} {{interval}}")
+alertcondition(isGhostShort,
+  title="MSNR Ghost Short",
+  message="🟡 Ghost Short {{plot_1}}/6 | {{ticker}} {{interval}}")
+alertcondition(isConfirmLong,
+  title="MSNR Confirmed LONG",
+  message="✅ LONG {{plot_0}}/6 | {{close}} | {{ticker}} {{interval}}")
+alertcondition(isConfirmShort,
+  title="MSNR Confirmed SHORT",
+  message="✅ SHORT {{plot_1}}/6 | {{close}} | {{ticker}} {{interval}}")
+alertcondition(bosLong,
+  title="BOS Bull",
+  message="📈 BOS Bullish | {{ticker}} {{interval}}")
+alertcondition(bosShort,
+  title="BOS Bear",
+  message="📉 BOS Bearish | {{ticker}} {{interval}}")
+alertcondition(liqSweepBull,
+  title="Sweep Lows",
+  message="💧 Lows Swept | {{ticker}} {{interval}}")
+alertcondition(liqSweepBear,
+  title="Sweep Highs",
+  message="💧 Highs Swept | {{ticker}} {{interval}}")
+
+// Hidden score plots for alert variables
+plot(score_bull, "Bull Score", display=display.none)
+plot(score_bear, "Bear Score", display=display.none)
+
+// ── Shapes ───────────────────────────────────────────────────────────────────
+plotshape(isConfirmLong,  style=shape.triangleup,
+  location=location.belowbar, color=C_BULL, size=size.small,
+  title="Confirmed Long")
+plotshape(isConfirmShort, style=shape.triangledown,
+  location=location.abovebar, color=C_BEAR, size=size.small,
+  title="Confirmed Short")
+plotshape(isGhostLong,  style=shape.circle,
+  location=location.belowbar, color=C_BULL_GHOST, size=size.tiny,
+  title="Ghost Long")
+plotshape(isGhostShort, style=shape.circle,
+  location=location.abovebar, color=C_BEAR_GHOST, size=size.tiny,
+  title="Ghost Short")
+plotshape(not na(swH) and i_showSMC, style=shape.diamond,
+  location=location.abovebar, color=color.new(#FF4757,40), size=size.tiny,
+  title="Swing High")
+plotshape(not na(swL) and i_showSMC, style=shape.diamond,
+  location=location.belowbar, color=color.new(#00D4A5,40), size=size.tiny,
+  title="Swing Low")
+
+// ============================================================================
+// END — MSNR + Fib Algorithm v6.0
+// ============================================================================
