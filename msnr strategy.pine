@@ -1,0 +1,488 @@
+//@version=5
+indicator("MSNR Strategy — Phoenix FX", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200)
+
+// ═══════════════════════════════════════════════════════════════
+//  MSNR STRATEGY — Phoenix FX
+//  Signals: BOS · MSS · TS · LQ Sweep · OCL/Doji · Trendline
+// ═══════════════════════════════════════════════════════════════
+
+// ─── SETTINGS ────────────────────────────────────────────────
+grp1 = "═══ Structure Settings ═══"
+bos_len       = input.int(10,   "Swing Length (BOS/MSS)",      minval=3,  maxval=50, group=grp1)
+show_bos      = input.bool(true, "Show BOS Labels",                                   group=grp1)
+show_mss      = input.bool(true, "Show MSS Labels",                                   group=grp1)
+show_ts       = input.bool(true, "Show TS (Target Sweep)",                            group=grp1)
+
+grp2 = "═══ Liquidity Settings ═══"
+show_lq       = input.bool(true, "Show Liquidity Levels",                             group=grp2)
+lq_len        = input.int(8,    "Liquidity Pivot Length",      minval=3,  maxval=30,  group=grp2)
+sweep_thresh  = input.float(0.5,"Sweep Threshold (pips/pts)",  minval=0.1,            group=grp2)
+
+grp3 = "═══ Entry Zones ═══"
+show_ocl      = input.bool(true, "Show OCL Zones",                                    group=grp3)
+show_doji     = input.bool(true, "Show Doji Signals",                                 group=grp3)
+doji_thresh   = input.float(0.25,"Doji Body % of Range",       minval=0.05,maxval=0.5,group=grp3)
+show_tl       = input.bool(true, "Show Trendlines",                                   group=grp3)
+tl_len        = input.int(20,   "Trendline Lookback",          minval=5,  maxval=100, group=grp3)
+
+grp4 = "═══ Signal & SL/TP ═══"
+show_signals  = input.bool(true, "Show Entry Signals",                                group=grp4)
+sl_pips       = input.float(10,  "Stop Loss (pts beyond wick)",minval=1,              group=grp4)
+tp1_mult      = input.float(1.5, "TP1 R:R Multiplier",         minval=0.5,            group=grp4)
+tp2_mult      = input.float(2.5, "TP2 R:R Multiplier",         minval=1.0,            group=grp4)
+tp3_mult      = input.float(4.0, "TP3 R:R Multiplier",         minval=2.0,            group=grp4)
+show_sl_tp    = input.bool(true, "Show SL/TP Lines",                                  group=grp4)
+
+grp5 = "═══ Colors ═══"
+col_bull      = input.color(color.new(#00ff88, 0),   "Bullish Color",  group=grp5)
+col_bear      = input.color(color.new(#ff3d5a, 0),   "Bearish Color",  group=grp5)
+col_lq        = input.color(color.new(#00d4ff, 70),  "Liquidity",      group=grp5)
+col_ocl       = input.color(color.new(#f0b429, 80),  "OCL Zone",       group=grp5)
+col_sl        = input.color(color.new(#ff3d5a, 0),   "SL Line",        group=grp5)
+col_tp        = input.color(color.new(#00ff88, 0),   "TP Lines",       group=grp5)
+
+// ─── HELPER FUNCTIONS ────────────────────────────────────────
+
+// Swing High/Low detection
+swingHigh(len) =>
+    ta.pivothigh(high, len, len)
+
+swingLow(len) =>
+    ta.pivotlow(low, len, len)
+
+// Candle body size
+bodySize() =>
+    math.abs(close - open)
+
+candleRange() =>
+    high - low
+
+// Doji detection
+isDoji() =>
+    rng = candleRange()
+    rng > 0 and (bodySize() / rng) <= doji_thresh
+
+// ─── MARKET STRUCTURE ────────────────────────────────────────
+
+ph = swingHigh(bos_len)
+pl = swingLow(bos_len)
+
+var float lastPH = na
+var float lastPL = na
+var float prevPH = na
+var float prevPL = na
+var int   structure = 0   // 1 = bullish, -1 = bearish
+
+// Track swing pivots
+if not na(ph)
+    prevPH := lastPH
+    lastPH := ph
+
+if not na(pl)
+    prevPL := lastPL
+    lastPL := pl
+
+// BOS Detection
+// Bullish BOS: price closes above last swing high
+bos_bull = not na(lastPH) and close > lastPH and close[1] <= lastPH
+// Bearish BOS: price closes below last swing low
+bos_bear = not na(lastPL) and close < lastPL and close[1] >= lastPL
+
+// MSS Detection (structure shift — opposite direction)
+// After bullish BOS, if price then breaks below a swing low = MSS (now bearish)
+var bool was_bullish = false
+var bool was_bearish = false
+
+if bos_bull
+    was_bullish := true
+    was_bearish := false
+    structure   := 1
+if bos_bear
+    was_bearish := true
+    was_bullish := false
+    structure   := -1
+
+// MSS = BOS in opposite direction after trend established
+mss_bear = was_bullish and bos_bear   // was going up, now broke down
+mss_bull = was_bearish and bos_bull   // was going down, now broke up
+
+// Target Sweep (TS): price spikes above swing high then rejects
+ts_bear = not na(lastPH) and high > lastPH and close < lastPH  // spike above then close below
+ts_bull = not na(lastPL) and low  < lastPL and close > lastPL  // spike below then close above
+
+// ─── PLOT BOS ────────────────────────────────────────────────
+if show_bos
+    if bos_bull and not mss_bull
+        label.new(bar_index, low - (high-low)*0.3,
+          "BOS", style=label.style_label_up,
+          color=col_bull, textcolor=color.black,
+          size=size.small)
+    if bos_bear and not mss_bear
+        label.new(bar_index, high + (high-low)*0.3,
+          "BOS", style=label.style_label_down,
+          color=col_bear, textcolor=color.white,
+          size=size.small)
+
+// ─── PLOT MSS ────────────────────────────────────────────────
+if show_mss
+    if mss_bear
+        label.new(bar_index, high + (high-low)*0.5,
+          "MSS ▼", style=label.style_label_down,
+          color=color.new(#ff3d5a, 0), textcolor=color.white,
+          size=size.normal)
+    if mss_bull
+        label.new(bar_index, low - (high-low)*0.5,
+          "MSS ▲", style=label.style_label_up,
+          color=color.new(#00ff88, 0), textcolor=color.black,
+          size=size.normal)
+
+// ─── PLOT TS ─────────────────────────────────────────────────
+if show_ts
+    if ts_bear
+        label.new(bar_index, high + (high-low)*0.2,
+          "TS", style=label.style_label_down,
+          color=color.new(#f0b429, 0), textcolor=color.black,
+          size=size.small)
+    if ts_bull
+        label.new(bar_index, low - (high-low)*0.2,
+          "TS", style=label.style_label_up,
+          color=color.new(#f0b429, 0), textcolor=color.black,
+          size=size.small)
+
+// ─── LIQUIDITY LEVELS ────────────────────────────────────────
+lqPH = swingHigh(lq_len)
+lqPL = swingLow(lq_len)
+
+var line lqHighLine = na
+var line lqLowLine  = na
+var float lqHighVal = na
+var float lqLowVal  = na
+
+if show_lq
+    if not na(lqPH)
+        lqHighVal := lqPH
+        if not na(lqHighLine)
+            line.delete(lqHighLine)
+        lqHighLine := line.new(bar_index - lq_len, lqPH, bar_index + 15,
+          lqPH, color=col_lq, width=1,
+          style=line.style_dotted, extend=extend.none)
+        label.new(bar_index - lq_len, lqPH,
+          "BSL", style=label.style_label_right,
+          color=color.new(#00d4ff, 85), textcolor=#00d4ff,
+          size=size.tiny)
+
+    if not na(lqPL)
+        lqLowVal := lqPL
+        if not na(lqLowLine)
+            line.delete(lqLowLine)
+        lqLowLine := line.new(bar_index - lq_len, lqPL, bar_index + 15,
+          lqPL, color=col_lq, width=1,
+          style=line.style_dotted, extend=extend.none)
+        label.new(bar_index - lq_len, lqPL,
+          "SSL", style=label.style_label_right,
+          color=color.new(#00d4ff, 85), textcolor=#00d4ff,
+          size=size.tiny)
+
+// Liquidity sweep detection
+lq_swept_high = not na(lqHighVal) and high > lqHighVal and close < lqHighVal
+lq_swept_low  = not na(lqLowVal)  and low  < lqLowVal  and close > lqLowVal
+
+if show_lq
+    if lq_swept_high
+        label.new(bar_index, high + (high-low)*0.1,
+          "LQ ✓", style=label.style_label_down,
+          color=color.new(#00d4ff, 30), textcolor=color.white,
+          size=size.tiny)
+    if lq_swept_low
+        label.new(bar_index, low - (high-low)*0.1,
+          "LQ ✓", style=label.style_label_up,
+          color=color.new(#00d4ff, 30), textcolor=color.white,
+          size=size.tiny)
+
+// ─── OCL ZONES ───────────────────────────────────────────────
+// OCL = Open-Close-Low (bearish) / Open-Close-High (bullish) zone
+// Key reversal candles — the zone between body and wick
+ocl_bear_cond = close < open and bodySize() / math.max(candleRange(), 0.0001) > 0.4
+ocl_bull_cond = close > open and bodySize() / math.max(candleRange(), 0.0001) > 0.4
+
+if show_ocl
+    if ocl_bear_cond and (mss_bear or ts_bear or bos_bear)
+        box.new(bar_index - 1, open, bar_index + 8, close,
+          border_color=col_ocl, bgcolor=col_ocl,
+          border_width=1, text="OCL", text_color=#f0b429,
+          text_size=size.tiny, text_halign=text.align_right)
+
+    if ocl_bull_cond and (mss_bull or ts_bull or bos_bull)
+        box.new(bar_index - 1, close, bar_index + 8, open,
+          border_color=col_ocl, bgcolor=col_ocl,
+          border_width=1, text="OCL", text_color=#f0b429,
+          text_size=size.tiny, text_halign=text.align_right)
+
+// ─── DOJI DETECTION ──────────────────────────────────────────
+dojiCandle = isDoji()
+
+// Doji at key zones (resistance or support proximity)
+nearResistance = not na(lastPH) and high >= lastPH * 0.9998 and high <= lastPH * 1.002
+nearSupport    = not na(lastPL) and low  <= lastPL * 1.0002 and low  >= lastPL * 0.998
+
+doji_sell_signal = show_doji and dojiCandle and nearResistance
+doji_buy_signal  = show_doji and dojiCandle and nearSupport
+
+if doji_sell_signal
+    label.new(bar_index, high + (high-low)*0.15,
+      "DOJI", style=label.style_label_down,
+      color=color.new(#ff3d5a, 20), textcolor=color.white,
+      size=size.tiny)
+
+if doji_buy_signal
+    label.new(bar_index, low - (high-low)*0.15,
+      "DOJI", style=label.style_label_up,
+      color=color.new(#00ff88, 20), textcolor=color.black,
+      size=size.tiny)
+
+// ─── TRENDLINES ──────────────────────────────────────────────
+// Dynamic trendline: connect last 2 swing highs (bearish TL) or lows (bullish TL)
+var float tl_h1 = na
+var float tl_h2 = na
+var int   tl_hi1 = na
+var int   tl_hi2 = na
+var float tl_l1 = na
+var float tl_l2 = na
+var int   tl_li1 = na
+var int   tl_li2 = na
+var line  bearTL = na
+var line  bullTL = na
+
+if not na(ph)
+    tl_h2  := tl_h1
+    tl_hi2 := tl_hi1
+    tl_h1  := ph
+    tl_hi1 := bar_index - bos_len
+
+if not na(pl)
+    tl_l2  := tl_l1
+    tl_li2 := tl_li1
+    tl_l1  := pl
+    tl_li1 := bar_index - bos_len
+
+if show_tl and not na(tl_h1) and not na(tl_h2) and tl_h1 < tl_h2
+    if not na(bearTL)
+        line.delete(bearTL)
+    bearTL := line.new(tl_hi2, tl_h2, tl_hi1, tl_h1,
+      color=color.new(#ff3d5a, 40), width=1,
+      style=line.style_dashed, extend=extend.right)
+
+if show_tl and not na(tl_l1) and not na(tl_l2) and tl_l1 > tl_l2
+    if not na(bullTL)
+        line.delete(bullTL)
+    bullTL := line.new(tl_li2, tl_l2, tl_li1, tl_l1,
+      color=color.new(#00ff88, 40), width=1,
+      style=line.style_dashed, extend=extend.right)
+
+// ─── FULL MSNR SIGNAL LOGIC ──────────────────────────────────
+// SELL Signal conditions (kitobdagi strategy):
+// 1. BOS up → TS → MSS down
+// 2. LQ swept above
+// 3. Doji or OCL at resistance
+// 4. Trendline touch (price at bearish TL)
+
+var int  bosUpBar   = na
+var bool bosUpActive = false
+
+if bos_bull
+    bosUpBar    := bar_index
+    bosUpActive := true
+
+if bos_bear or mss_bear
+    bosUpActive := false
+
+// SELL: BOS up → TS → MSS = full MSNR sell
+msnr_sell = show_signals and
+  mss_bear and
+  lq_swept_high[0] or lq_swept_high[1] or lq_swept_high[2]
+
+// BUY: BOS down → TS → MSS up
+var int  bosDnBar   = na
+var bool bosDnActive = false
+
+if bos_bear
+    bosDnBar    := bar_index
+    bosDnActive := true
+
+if bos_bull or mss_bull
+    bosDnActive := false
+
+msnr_buy = show_signals and
+  mss_bull and
+  (lq_swept_low[0] or lq_swept_low[1] or lq_swept_low[2])
+
+// Doji confluence boosts
+sell_doji_conf = mss_bear and doji_sell_signal
+buy_doji_conf  = mss_bull and doji_buy_signal
+
+// ─── ENTRY SIGNALS ───────────────────────────────────────────
+// Main MSNR Sell
+if msnr_sell
+    label.new(bar_index, high + (high-low)*0.6,
+      "🔴 SELL\nMSNR", style=label.style_label_down,
+      color=#ff3d5a, textcolor=color.white,
+      size=size.normal)
+
+// Main MSNR Buy
+if msnr_buy
+    label.new(bar_index, low - (high-low)*0.6,
+      "🟢 BUY\nMSNR", style=label.style_label_up,
+      color=#00ff88, textcolor=color.black,
+      size=size.normal)
+
+// Doji-confirmed sell
+if sell_doji_conf
+    label.new(bar_index, high + (high-low)*0.9,
+      "★ SELL\nDOJI+MSS", style=label.style_label_down,
+      color=color.new(#ff3d5a, 0), textcolor=color.white,
+      size=size.large)
+
+// Doji-confirmed buy
+if buy_doji_conf
+    label.new(bar_index, low - (high-low)*0.9,
+      "★ BUY\nDOJI+MSS", style=label.style_label_up,
+      color=color.new(#00ff88, 0), textcolor=color.black,
+      size=size.large)
+
+// ─── SL / TP LINES ───────────────────────────────────────────
+var line sl_line  = na
+var line tp1_line = na
+var line tp2_line = na
+var line tp3_line = na
+
+if show_sl_tp
+    if msnr_sell or sell_doji_conf
+        sl_val  = high + sl_pips
+        risk    = sl_val - close
+        t1 = close - risk * tp1_mult
+        t2 = close - risk * tp2_mult
+        t3 = close - risk * tp3_mult
+
+        if not na(sl_line)
+            line.delete(sl_line)
+            line.delete(tp1_line)
+            line.delete(tp2_line)
+            line.delete(tp3_line)
+
+        sl_line  := line.new(bar_index, sl_val, bar_index + 30, sl_val,
+          color=col_sl, width=1, style=line.style_solid)
+        tp1_line := line.new(bar_index, t1, bar_index + 30, t1,
+          color=col_tp, width=1, style=line.style_dashed)
+        tp2_line := line.new(bar_index, t2, bar_index + 30, t2,
+          color=col_tp, width=1, style=line.style_dashed)
+        tp3_line := line.new(bar_index, t3, bar_index + 30, t3,
+          color=col_tp, width=1, style=line.style_dotted)
+
+        label.new(bar_index + 30, sl_val,  "SL",  style=label.style_label_left, color=col_sl,  textcolor=color.white, size=size.tiny)
+        label.new(bar_index + 30, t1,      "TP1", style=label.style_label_left, color=col_tp,  textcolor=color.black, size=size.tiny)
+        label.new(bar_index + 30, t2,      "TP2", style=label.style_label_left, color=col_tp,  textcolor=color.black, size=size.tiny)
+        label.new(bar_index + 30, t3,      "TP3", style=label.style_label_left, color=color.new(#f0b429,0), textcolor=color.black, size=size.tiny)
+
+    if msnr_buy or buy_doji_conf
+        sl_val  = low - sl_pips
+        risk    = close - sl_val
+        t1 = close + risk * tp1_mult
+        t2 = close + risk * tp2_mult
+        t3 = close + risk * tp3_mult
+
+        if not na(sl_line)
+            line.delete(sl_line)
+            line.delete(tp1_line)
+            line.delete(tp2_line)
+            line.delete(tp3_line)
+
+        sl_line  := line.new(bar_index, sl_val, bar_index + 30, sl_val,
+          color=col_sl, width=1, style=line.style_solid)
+        tp1_line := line.new(bar_index, t1, bar_index + 30, t1,
+          color=col_tp, width=1, style=line.style_dashed)
+        tp2_line := line.new(bar_index, t2, bar_index + 30, t2,
+          color=col_tp, width=1, style=line.style_dashed)
+        tp3_line := line.new(bar_index, t3, bar_index + 30, t3,
+          color=col_tp, width=1, style=line.style_dotted)
+
+        label.new(bar_index + 30, sl_val,  "SL",  style=label.style_label_left, color=col_sl,  textcolor=color.white, size=size.tiny)
+        label.new(bar_index + 30, t1,      "TP1", style=label.style_label_left, color=col_tp,  textcolor=color.black, size=size.tiny)
+        label.new(bar_index + 30, t2,      "TP2", style=label.style_label_left, color=col_tp,  textcolor=color.black, size=size.tiny)
+        label.new(bar_index + 30, t3,      "TP3", style=label.style_label_left, color=color.new(#f0b429,0), textcolor=color.black, size=size.tiny)
+
+// ─── BACKGROUND BIAS ─────────────────────────────────────────
+bgcolor(structure == 1 ? color.new(#00ff88, 97) : structure == -1 ? color.new(#ff3d5a, 97) : na)
+
+// ─── INFO TABLE ──────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 8,
+  bgcolor=color.new(#050508, 10),
+  border_color=color.new(#1a1f2e, 0),
+  border_width=1, frame_color=color.new(#f0b429, 50), frame_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(infoTable, 0, 0, "MSNR · Phoenix FX",
+      text_color=#f0b429, text_size=size.small,
+      bgcolor=color.new(#0e1018, 0), text_halign=text.align_center)
+    table.merge_cells(infoTable, 0, 0, 1, 0)
+
+    // Structure
+    table.cell(infoTable, 0, 1, "Structure",  text_color=color.new(color.white, 40), text_size=size.tiny)
+    table.cell(infoTable, 1, 1,
+      structure == 1 ? "BULLISH" : structure == -1 ? "BEARISH" : "NEUTRAL",
+      text_color=structure == 1 ? #00ff88 : structure == -1 ? #ff3d5a : #f0b429,
+      text_size=size.small)
+
+    // Last signal
+    table.cell(infoTable, 0, 2, "Signal",     text_color=color.new(color.white, 40), text_size=size.tiny)
+    table.cell(infoTable, 1, 2,
+      msnr_sell or sell_doji_conf ? "🔴 SELL" : msnr_buy or buy_doji_conf ? "🟢 BUY" : "—",
+      text_color=msnr_sell or sell_doji_conf ? #ff3d5a : msnr_buy or buy_doji_conf ? #00ff88 : color.white,
+      text_size=size.small)
+
+    // BOS
+    table.cell(infoTable, 0, 3, "BOS",        text_color=color.new(color.white, 40), text_size=size.tiny)
+    table.cell(infoTable, 1, 3,
+      bos_bull ? "↑ UP" : bos_bear ? "↓ DOWN" : "—",
+      text_color=bos_bull ? #00ff88 : bos_bear ? #ff3d5a : color.gray,
+      text_size=size.tiny)
+
+    // MSS
+    table.cell(infoTable, 0, 4, "MSS",        text_color=color.new(color.white, 40), text_size=size.tiny)
+    table.cell(infoTable, 1, 4,
+      mss_bull ? "↑ BULL" : mss_bear ? "↓ BEAR" : "—",
+      text_color=mss_bull ? #00ff88 : mss_bear ? #ff3d5a : color.gray,
+      text_size=size.tiny)
+
+    // TS
+    table.cell(infoTable, 0, 5, "TS Sweep",   text_color=color.new(color.white, 40), text_size=size.tiny)
+    table.cell(infoTable, 1, 5,
+      ts_bear ? "↓ SWEPT" : ts_bull ? "↑ SWEPT" : "—",
+      text_color=ts_bear ? #ff3d5a : ts_bull ? #00ff88 : color.gray,
+      text_size=size.tiny)
+
+    // Doji
+    table.cell(infoTable, 0, 6, "Doji",       text_color=color.new(color.white, 40), text_size=size.tiny)
+    table.cell(infoTable, 1, 6,
+      dojiCandle ? "✓ YES" : "—",
+      text_color=dojiCandle ? #f0b429 : color.gray,
+      text_size=size.tiny)
+
+    // LQ
+    table.cell(infoTable, 0, 7, "LQ Swept",   text_color=color.new(color.white, 40), text_size=size.tiny)
+    table.cell(infoTable, 1, 7,
+      lq_swept_high ? "↑ HIGH" : lq_swept_low ? "↓ LOW" : "—",
+      text_color=lq_swept_high ? #ff3d5a : lq_swept_low ? #00ff88 : color.gray,
+      text_size=size.tiny)
+
+// ─── ALERTS ──────────────────────────────────────────────────
+alertcondition(msnr_sell,       "MSNR SELL Signal",         "🔴 MSNR SELL — BOS+MSS+LQ confirmed")
+alertcondition(msnr_buy,        "MSNR BUY Signal",          "🟢 MSNR BUY — BOS+MSS+LQ confirmed")
+alertcondition(sell_doji_conf,  "MSNR SELL + Doji",         "🔴 STRONG SELL — MSS + Doji confirmed")
+alertcondition(buy_doji_conf,   "MSNR BUY + Doji",          "🟢 STRONG BUY — MSS + Doji confirmed")
+alertcondition(mss_bear,        "MSS Bearish",               "MSS Bearish formed")
+alertcondition(mss_bull,        "MSS Bullish",               "MSS Bullish formed")
+alertcondition(ts_bear,         "Target Sweep (Bearish)",    "TS — Liquidity above swept")
+alertcondition(ts_bull,         "Target Sweep (Bullish)",    "TS — Liquidity below swept")
+alertcondition(lq_swept_high,   "Liquidity Swept (High)",    "Buy-Side Liquidity cleared")
+alertcondition(lq_swept_low,    "Liquidity Swept (Low)",     "Sell-Side Liquidity cleared")
