@@ -1,0 +1,504 @@
+// ============================================================
+//  PROP FIRM MASTER STRATEGY v2.0
+//  Malaysian SNR + ICT Concepts + Fibonacci
+//  Author  : Professional Trading System
+//  Version : 2.0
+//  Works on: Forex, Indices, Crypto (M15 / H1 / H4)
+//  Purpose : Prop Firm Challenge — High Accuracy Signals
+// ============================================================
+// SIGNAL LOGIC:
+//   BUY  → SNR Support + Fibo 61.8% + ICT OB + Bullish CHoCH
+//   SELL → SNR Resistance + Fibo 61.8% + ICT OB + Bearish CHoCH
+//   All signals filtered by HTF Trend (EMA 200)
+// ============================================================
+
+//@version=5
+indicator("Prop Firm Master [SNR+ICT+FIBO]", shorttitle="PF Master v2", overlay=true, max_boxes_count=200, max_lines_count=300, max_labels_count=200)
+
+// ════════════════════════════════════════════════
+//  INPUTS
+// ════════════════════════════════════════════════
+grp1 = "═══ SNR SETTINGS ═══"
+snr_lb        = input.int(20,   "SNR Lookback (bars)",        group=grp1, minval=5, maxval=100)
+snr_strength  = input.int(2,    "Min Touches for Valid Zone", group=grp1, minval=1, maxval=5)
+show_snr      = input.bool(true,"Show SNR Zones",             group=grp1)
+
+grp2 = "═══ ICT SETTINGS ═══"
+ob_lb         = input.int(10,   "Order Block Lookback",       group=grp2, minval=3, maxval=50)
+show_ob       = input.bool(true,"Show Order Blocks",          group=grp2)
+show_fvg      = input.bool(true,"Show Fair Value Gaps (FVG)", group=grp2)
+show_liquidity= input.bool(true,"Show Liquidity Levels",      group=grp2)
+liq_lb        = input.int(30,   "Liquidity Lookback",         group=grp2, minval=10, maxval=100)
+
+grp3 = "═══ FIBONACCI ═══"
+fib_lb        = input.int(50,   "Fibonacci Swing Lookback",   group=grp3, minval=20, maxval=200)
+show_fib      = input.bool(true,"Show Fibonacci Levels",      group=grp3)
+fib_618_zone  = input.float(0.03,"Fib 61.8% Zone Tolerance %",group=grp3, minval=0.005, maxval=0.1, step=0.005)
+
+grp4 = "═══ TREND FILTER ═══"
+ema_fast      = input.int(50,   "EMA Fast",                   group=grp4)
+ema_slow      = input.int(200,  "EMA Slow (Trend Filter)",    group=grp4)
+show_ema      = input.bool(true,"Show EMAs",                  group=grp4)
+
+grp5 = "═══ SIGNAL SETTINGS ═══"
+show_signals  = input.bool(true,"Show Entry Signals",         group=grp5)
+show_sl_tp    = input.bool(true,"Show SL / TP Levels",        group=grp5)
+rr_tp1        = input.float(2.0,"TP1 Risk:Reward",            group=grp5, minval=1.0, maxval=10.0, step=0.5)
+rr_tp2        = input.float(3.5,"TP2 Risk:Reward",            group=grp5, minval=1.0, maxval=10.0, step=0.5)
+sl_buffer     = input.float(0.3,"SL Buffer (× ATR)",          group=grp5, minval=0.1, maxval=1.0, step=0.1)
+
+grp6 = "═══ ALERTS ═══"
+alert_signals = input.bool(true,"Enable Signal Alerts",       group=grp6)
+
+grp7 = "═══ COLORS ═══"
+col_bull_snr  = input.color(color.new(#00D4FF,80),"Bull SNR Zone",  group=grp7)
+col_bear_snr  = input.color(color.new(#FF6B35,80),"Bear SNR Zone",  group=grp7)
+col_bull_ob   = input.color(color.new(#A8FF78,75),"Bullish OB",     group=grp7)
+col_bear_ob   = input.color(color.new(#FF9FF3,75),"Bearish OB",     group=grp7)
+col_fvg       = input.color(color.new(#FFD700,85),"FVG",            group=grp7)
+col_buy_sig   = input.color(#00D4FF,"BUY Signal",                    group=grp7)
+col_sell_sig  = input.color(#FF4757,"SELL Signal",                   group=grp7)
+
+// ════════════════════════════════════════════════
+//  UTILITY FUNCTIONS
+// ════════════════════════════════════════════════
+atr14 = ta.atr(14)
+
+// Swing High / Low detection
+swingHigh(lb) =>
+    hi = high[lb]
+    isHigh = true
+    for i = 0 to lb - 1
+        if high[i] > hi or high[lb*2 - i] > hi
+            isHigh := false
+    isHigh
+
+swingLow(lb) =>
+    lo = low[lb]
+    isLow = true
+    for i = 0 to lb - 1
+        if low[i] < lo or low[lb*2 - i] < lo
+            isLow := false
+    isLow
+
+// ════════════════════════════════════════════════
+//  EMA TREND FILTER
+// ════════════════════════════════════════════════
+ema50  = ta.ema(close, ema_fast)
+ema200 = ta.ema(close, ema_slow)
+
+bullTrend = ema50 > ema200
+bearTrend = ema50 < ema200
+
+if show_ema
+    plot(ema50,  "EMA 50",  color=color.new(#FFD700, 0), linewidth=1)
+    plot(ema200, "EMA 200", color=color.new(#FF4757, 0), linewidth=2)
+
+// ════════════════════════════════════════════════
+//  SNR ZONES — MALAYSIAN METHOD
+// ════════════════════════════════════════════════
+var float[] snr_highs = array.new_float()
+var float[] snr_lows  = array.new_float()
+var box[]   snr_boxes = array.new_box()
+
+// Detect swing points and build SNR zones
+isSwingH = swingHigh(snr_lb)
+isSwingL = swingLow(snr_lb)
+
+if isSwingH
+    array.push(snr_highs, high[snr_lb])
+    if array.size(snr_highs) > 20
+        array.shift(snr_highs)
+
+if isSwingL
+    array.push(snr_lows, low[snr_lb])
+    if array.size(snr_lows) > 20
+        array.shift(snr_lows)
+
+// Draw current SNR zones (last 3)
+snr_res_hi = array.size(snr_highs) > 0 ? array.get(snr_highs, array.size(snr_highs)-1) : na
+snr_sup_lo = array.size(snr_lows)  > 0 ? array.get(snr_lows,  array.size(snr_lows)-1)  : na
+
+// Zone body = ATR-based thickness
+zone_h = atr14 * 0.5
+
+if show_snr and not na(snr_res_hi)
+    box.new(bar_index - snr_lb, snr_res_hi + zone_h, bar_index + 30, snr_res_hi - zone_h,
+            border_color=color.new(#FF6B35,40), bgcolor=col_bear_snr, border_width=1)
+
+if show_snr and not na(snr_sup_lo)
+    box.new(bar_index - snr_lb, snr_sup_lo + zone_h, bar_index + 30, snr_sup_lo - zone_h,
+            border_color=color.new(#00D4FF,40), bgcolor=col_bull_snr, border_width=1)
+
+// SNR Labels
+if show_snr and isSwingH
+    label.new(bar_index - snr_lb, high[snr_lb] + atr14,
+              "R", style=label.style_label_down,
+              color=color.new(#FF6B35,20), textcolor=#FF6B35, size=size.small)
+
+if show_snr and isSwingL
+    label.new(bar_index - snr_lb, low[snr_lb] - atr14,
+              "S", style=label.style_label_up,
+              color=color.new(#00D4FF,20), textcolor=#00D4FF, size=size.small)
+
+// ════════════════════════════════════════════════
+//  ICT — ORDER BLOCKS
+// ════════════════════════════════════════════════
+// Bullish OB: last bearish candle before bullish impulse
+// Bearish OB: last bullish candle before bearish impulse
+
+isBullishImpulse = close > close[1] and (close - open) / atr14 > 1.5
+isBearishImpulse = close < close[1] and (open - close) / atr14 > 1.5
+
+// Last bearish candle before bullish impulse = Bullish OB
+bull_ob_top    = isBullishImpulse ? open[1] : na
+bull_ob_bot    = isBullishImpulse ? close[1] : na
+bull_ob_active = isBullishImpulse and close[1] < open[1]
+
+// Last bullish candle before bearish impulse = Bearish OB
+bear_ob_top    = isBearishImpulse ? close[1] : na
+bear_ob_bot    = isBearishImpulse ? open[1] : na
+bear_ob_active = isBearishImpulse and close[1] > open[1]
+
+if show_ob and bull_ob_active
+    box.new(bar_index - 1, bull_ob_top, bar_index + 15, bull_ob_bot,
+            border_color=color.new(#A8FF78,30), bgcolor=col_bull_ob, border_width=1)
+    label.new(bar_index - 1, bull_ob_bot - atr14 * 0.3,
+              "BULL OB", style=label.style_label_up,
+              color=color.new(#A8FF78,20), textcolor=#A8FF78, size=size.tiny)
+
+if show_ob and bear_ob_active
+    box.new(bar_index - 1, bear_ob_top, bar_index + 15, bear_ob_bot,
+            border_color=color.new(#FF9FF3,30), bgcolor=col_bear_ob, border_width=1)
+    label.new(bar_index - 1, bear_ob_top + atr14 * 0.3,
+              "BEAR OB", style=label.style_label_down,
+              color=color.new(#FF9FF3,20), textcolor=#FF9FF3, size=size.tiny)
+
+// ════════════════════════════════════════════════
+//  ICT — FAIR VALUE GAP (FVG)
+// ════════════════════════════════════════════════
+// Bullish FVG: low[0] > high[2] (gap between candle 1 and 3)
+// Bearish FVG: high[0] < low[2]
+
+bullFVG = show_fvg and low > high[2]
+bearFVG = show_fvg and high < low[2]
+
+if bullFVG
+    box.new(bar_index - 2, low, bar_index + 8, high[2],
+            border_color=color.new(#FFD700,50), bgcolor=col_fvg, border_width=1)
+    label.new(bar_index - 1, math.avg(low, high[2]),
+              "FVG", style=label.style_label_left,
+              color=color.new(#FFD700,30), textcolor=#FFD700, size=size.tiny)
+
+if bearFVG
+    box.new(bar_index - 2, low[2], bar_index + 8, high,
+            border_color=color.new(#FFD700,50), bgcolor=col_fvg, border_width=1)
+    label.new(bar_index - 1, math.avg(low[2], high),
+              "FVG", style=label.style_label_left,
+              color=color.new(#FFD700,30), textcolor=#FFD700, size=size.tiny)
+
+// ════════════════════════════════════════════════
+//  ICT — LIQUIDITY LEVELS
+// ════════════════════════════════════════════════
+liq_high = ta.highest(high, liq_lb)
+liq_low  = ta.lowest(low,   liq_lb)
+
+if show_liquidity
+    line.new(bar_index - liq_lb, liq_high, bar_index + 10, liq_high,
+             color=color.new(#FFD700,30), width=1, style=line.style_dashed)
+    line.new(bar_index - liq_lb, liq_low,  bar_index + 10, liq_low,
+             color=color.new(#FF4757,30), width=1, style=line.style_dashed)
+
+// Liquidity swept?
+bsl_swept = high >= liq_high[1] and close < liq_high[1]   // Buy Side swept
+ssl_swept = low  <= liq_low[1]  and close > liq_low[1]    // Sell Side swept
+
+if show_liquidity and bsl_swept
+    label.new(bar_index, high + atr14, "BSL SWEPT ⚡",
+              style=label.style_label_down, color=color.new(#FF4757,10),
+              textcolor=#FFD700, size=size.small)
+
+if show_liquidity and ssl_swept
+    label.new(bar_index, low - atr14, "SSL SWEPT ⚡",
+              style=label.style_label_up, color=color.new(#00D4FF,10),
+              textcolor=#FFD700, size=size.small)
+
+// ════════════════════════════════════════════════
+//  FIBONACCI RETRACEMENT
+// ════════════════════════════════════════════════
+// Auto swing high/low for fibonacci
+fib_high = ta.highest(high, fib_lb)
+fib_low  = ta.lowest(low,   fib_lb)
+fib_range = fib_high - fib_low
+
+// Key fib levels
+fib_236 = fib_high - fib_range * 0.236
+fib_382 = fib_high - fib_range * 0.382
+fib_500 = fib_high - fib_range * 0.500
+fib_618 = fib_high - fib_range * 0.618
+fib_786 = fib_high - fib_range * 0.786
+
+// Plot fibonacci levels
+if show_fib
+    plot(fib_618, "Fib 61.8%", color=color.new(#00D4FF,0), linewidth=2, style=plot.style_line)
+    plot(fib_500, "Fib 50.0%", color=color.new(#A8FF78,30), linewidth=1, style=plot.style_line)
+    plot(fib_382, "Fib 38.2%", color=color.new(#FFD700,40), linewidth=1, style=plot.style_line)
+    plot(fib_786, "Fib 78.6%", color=color.new(#FF6B35,40), linewidth=1, style=plot.style_line)
+
+// Is price in 61.8% zone?
+fib618_zone_size = fib_range * fib_618_zone
+near_fib618_bull = close <= fib_618 + fib618_zone_size and close >= fib_618 - fib618_zone_size
+near_fib618_bear = close >= (fib_high - fib_range * 0.382) - fib618_zone_size and
+                   close <= (fib_high - fib_range * 0.382) + fib618_zone_size
+
+// ════════════════════════════════════════════════
+//  MARKET STRUCTURE — CHoCH / BOS
+// ════════════════════════════════════════════════
+// Change of Character (CHoCH) — structure flip
+prev_high = ta.highest(high, 10)[1]
+prev_low  = ta.lowest(low,   10)[1]
+
+choch_bull = close > prev_high and close[1] < prev_high  // Break above recent high
+choch_bear = close < prev_low  and close[1] > prev_low   // Break below recent low
+
+bos_bull   = choch_bull and bullTrend
+bos_bear   = choch_bear and bearTrend
+
+if choch_bull
+    label.new(bar_index, low - atr14 * 0.5, "CHoCH+",
+              style=label.style_label_up, color=color.new(#A8FF78,20),
+              textcolor=#A8FF78, size=size.tiny)
+
+if choch_bear
+    label.new(bar_index, high + atr14 * 0.5, "CHoCH-",
+              style=label.style_label_down, color=color.new(#FF4757,20),
+              textcolor=#FF4757, size=size.tiny)
+
+// ════════════════════════════════════════════════
+//  SESSION FILTER (London + NY only)
+// ════════════════════════════════════════════════
+london_open = time(timeframe.period, "0700-1200", "Europe/London")
+ny_open     = time(timeframe.period, "1300-1800", "Europe/London")
+in_session  = not na(london_open) or not na(ny_open)
+
+bgcolor(in_session ? color.new(#FFFFFF, 98) : na, title="Trading Session")
+
+// ════════════════════════════════════════════════
+//  MASTER SIGNAL ENGINE
+// ════════════════════════════════════════════════
+// BUY CONDITIONS (all must be true):
+// 1. Bullish EMA trend (50 > 200)
+// 2. Price near SNR Support zone
+// 3. Price near Fib 61.8% retracement
+// 4. Bullish Order Block present OR FVG
+// 5. SSL Swept (liquidity taken)
+// 6. CHoCH Bullish confirmation
+
+near_sup_zone = not na(snr_sup_lo) and
+                close <= snr_sup_lo + atr14 * 2 and
+                close >= snr_sup_lo - atr14 * 2
+
+near_res_zone = not na(snr_res_hi) and
+                close >= snr_res_hi - atr14 * 2 and
+                close <= snr_res_hi + atr14 * 2
+
+// Score system — how many conditions met
+buy_score  = (bullTrend ? 1 : 0) +
+             (near_sup_zone ? 1 : 0) +
+             (near_fib618_bull ? 1 : 0) +
+             (ssl_swept or ssl_swept[1] or ssl_swept[2] ? 1 : 0) +
+             (choch_bull ? 1 : 0) +
+             (bull_ob_active[1] or bull_ob_active[2] ? 1 : 0) +
+             (bullFVG[1] or bullFVG[2] ? 1 : 0) +
+             (in_session ? 1 : 0)
+
+sell_score = (bearTrend ? 1 : 0) +
+             (near_res_zone ? 1 : 0) +
+             (near_fib618_bear ? 1 : 0) +
+             (bsl_swept or bsl_swept[1] or bsl_swept[2] ? 1 : 0) +
+             (choch_bear ? 1 : 0) +
+             (bear_ob_active[1] or bear_ob_active[2] ? 1 : 0) +
+             (bearFVG[1] or bearFVG[2] ? 1 : 0) +
+             (in_session ? 1 : 0)
+
+// Signal fires when score >= 4 (minimum 4 conditions)
+buy_signal  = buy_score  >= 4 and not buy_score[1]  >= 4
+sell_signal = sell_score >= 4 and not sell_score[1] >= 4
+
+// Signal strength labels
+sig_qual(score) =>
+    score >= 7 ? "A+" :
+    score >= 6 ? "A"  :
+    score >= 5 ? "B+" :
+    score >= 4 ? "B"  : "C"
+
+// ════════════════════════════════════════════════
+//  SIGNAL DISPLAY + SL/TP
+// ════════════════════════════════════════════════
+if show_signals and buy_signal
+    sl_buy  = low  - atr14 * sl_buffer
+    tp1_buy = close + (close - sl_buy) * rr_tp1
+    tp2_buy = close + (close - sl_buy) * rr_tp2
+    qual    = sig_qual(buy_score)
+
+    label.new(bar_index, low - atr14 * 1.5,
+              "BUY " + qual + "\nScore: " + str.tostring(buy_score) + "/8\nEntry: " + str.tostring(close, "#.#####") +
+              "\nSL: " + str.tostring(sl_buy, "#.#####") +
+              "\nTP1: " + str.tostring(tp1_buy, "#.#####") +
+              "\nTP2: " + str.tostring(tp2_buy, "#.#####"),
+              style=label.style_label_up,
+              color=color.new(col_buy_sig, 10),
+              textcolor=color.white,
+              size=size.normal)
+
+    if show_sl_tp
+        line.new(bar_index, sl_buy,  bar_index + 20, sl_buy,
+                 color=color.new(#FF4757,0), width=2, style=line.style_dashed)
+        line.new(bar_index, tp1_buy, bar_index + 20, tp1_buy,
+                 color=color.new(#A8FF78,0), width=2, style=line.style_dashed)
+        line.new(bar_index, tp2_buy, bar_index + 20, tp2_buy,
+                 color=color.new(#FFD700,0), width=1, style=line.style_dotted)
+
+if show_signals and sell_signal
+    sl_sell  = high + atr14 * sl_buffer
+    tp1_sell = close - (sl_sell - close) * rr_tp1
+    tp2_sell = close - (sl_sell - close) * rr_tp2
+    qual     = sig_qual(sell_score)
+
+    label.new(bar_index, high + atr14 * 1.5,
+              "SELL " + qual + "\nScore: " + str.tostring(sell_score) + "/8\nEntry: " + str.tostring(close, "#.#####") +
+              "\nSL: " + str.tostring(sl_sell, "#.#####") +
+              "\nTP1: " + str.tostring(tp1_sell, "#.#####") +
+              "\nTP2: " + str.tostring(tp2_sell, "#.#####"),
+              style=label.style_label_down,
+              color=color.new(col_sell_sig, 10),
+              textcolor=color.white,
+              size=size.normal)
+
+    if show_sl_tp
+        line.new(bar_index, sl_sell,  bar_index + 20, sl_sell,
+                 color=color.new(#FF4757,0), width=2, style=line.style_dashed)
+        line.new(bar_index, tp1_sell, bar_index + 20, tp1_sell,
+                 color=color.new(#A8FF78,0), width=2, style=line.style_dashed)
+        line.new(bar_index, tp2_sell, bar_index + 20, tp2_sell,
+                 color=color.new(#FFD700,0), width=1, style=line.style_dotted)
+
+// ════════════════════════════════════════════════
+//  DASHBOARD — TOP RIGHT PANEL
+// ════════════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 12,
+                           bgcolor=color.new(#0D1525,5),
+                           border_color=color.new(#C9A84C,50),
+                           border_width=1, frame_color=color.new(#C9A84C,30), frame_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(dash, 0, 0, "PROP FIRM MASTER",
+               bgcolor=color.new(#C9A84C,20), text_color=#C9A84C,
+               text_size=size.small, text_halign=text.align_center)
+    table.cell(dash, 1, 0, "SNR+ICT+FIBO",
+               bgcolor=color.new(#C9A84C,20), text_color=#FFD700,
+               text_size=size.small, text_halign=text.align_center)
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    // Trend
+    table.cell(dash, 0, 1, "TREND",
+               text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 1, bullTrend ? "BULLISH ▲" : "BEARISH ▼",
+               text_color=bullTrend ? #00D4FF : #FF4757, text_size=size.tiny)
+
+    // Session
+    table.cell(dash, 0, 2, "SESSION",
+               text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 2, in_session ? "ACTIVE ✓" : "CLOSED ✗",
+               text_color=in_session ? #A8FF78 : #666666, text_size=size.tiny)
+
+    // Buy Score
+    table.cell(dash, 0, 3, "BUY SCORE",
+               text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 3, str.tostring(buy_score) + "/8 [" + sig_qual(buy_score) + "]",
+               text_color=buy_score >= 5 ? #00D4FF : buy_score >= 4 ? #FFD700 : #FF4757,
+               text_size=size.tiny)
+
+    // Sell Score
+    table.cell(dash, 0, 4, "SELL SCORE",
+               text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 4, str.tostring(sell_score) + "/8 [" + sig_qual(sell_score) + "]",
+               text_color=sell_score >= 5 ? #FF4757 : sell_score >= 4 ? #FFD700 : #666666,
+               text_size=size.tiny)
+
+    // Fib 61.8%
+    table.cell(dash, 0, 5, "FIB 61.8%",
+               text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 5, str.tostring(fib_618, "#.####"),
+               text_color=#00D4FF, text_size=size.tiny)
+
+    // ATR
+    table.cell(dash, 0, 6, "ATR(14)",
+               text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 6, str.tostring(atr14, "#.#####"),
+               text_color=#FFD700, text_size=size.tiny)
+
+    // SNR Resistance
+    table.cell(dash, 0, 7, "SNR RES",
+               text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 7, not na(snr_res_hi) ? str.tostring(snr_res_hi, "#.####") : "—",
+               text_color=#FF6B35, text_size=size.tiny)
+
+    // SNR Support
+    table.cell(dash, 0, 8, "SNR SUP",
+               text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 8, not na(snr_sup_lo) ? str.tostring(snr_sup_lo, "#.####") : "—",
+               text_color=#00D4FF, text_size=size.tiny)
+
+    // Liquidity
+    table.cell(dash, 0, 9, "LIQ HIGH",
+               text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 9, str.tostring(liq_high, "#.####"),
+               text_color=#FFD700, text_size=size.tiny)
+
+    table.cell(dash, 0, 10, "LIQ LOW",
+               text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 10, str.tostring(liq_low, "#.####"),
+               text_color=#FF4757, text_size=size.tiny)
+
+    // Signal Status
+    sig_text = buy_signal ? "BUY SIGNAL!" : sell_signal ? "SELL SIGNAL!" : "WAITING..."
+    sig_col  = buy_signal ? #00D4FF : sell_signal ? #FF4757 : color.new(#666666,0)
+    table.cell(dash, 0, 11, "STATUS",
+               bgcolor=color.new(sig_col,80), text_color=color.new(#AAAAAA,0), text_size=size.tiny)
+    table.cell(dash, 1, 11, sig_text,
+               bgcolor=color.new(sig_col,80), text_color=sig_col,
+               text_size=size.small, text_font_style=font.style_bold)
+
+// ════════════════════════════════════════════════
+//  ALERTS
+// ════════════════════════════════════════════════
+alertcondition(buy_signal,  "PF Master BUY",
+               "BUY SIGNAL (Score: {{plot_0}}) | {{ticker}} {{interval}} | Entry: {{close}}")
+alertcondition(sell_signal, "PF Master SELL",
+               "SELL SIGNAL (Score: {{plot_0}}) | {{ticker}} {{interval}} | Entry: {{close}}")
+alertcondition(ssl_swept,   "SSL Swept — BUY Setup Coming",
+               "SSL Swept on {{ticker}} {{interval}} — Watch for BUY setup!")
+alertcondition(bsl_swept,   "BSL Swept — SELL Setup Coming",
+               "BSL Swept on {{ticker}} {{interval}} — Watch for SELL setup!")
+alertcondition(choch_bull,  "Bullish CHoCH",  "Bullish CHoCH on {{ticker}} {{interval}}")
+alertcondition(choch_bear,  "Bearish CHoCH",  "Bearish CHoCH on {{ticker}} {{interval}}")
+
+// Invisible plots for alert message formatting
+plot(buy_score,  display=display.none, title="Buy Score")
+plot(sell_score, display=display.none, title="Sell Score")
+
+// ════════════════════════════════════════════════
+//  SIGNAL CANDLE HIGHLIGHT
+// ════════════════════════════════════════════════
+barcolor(buy_signal  ? color.new(#00D4FF,60) : na, title="BUY Bar")
+barcolor(sell_signal ? color.new(#FF4757,60) : na, title="SELL Bar")
+
+// ════════════════════════════════════════════════
+//  SIGNAL SCORE SUBPLOT (optional — comment out if not needed)
+// ════════════════════════════════════════════════
+// Uncomment below 3 lines to add score subplot:
+// hline(4, "Min Signal", color=#FFD700, linestyle=hline.style_dashed)
+// plot(buy_score,  "Buy Score",  color=#00D4FF, linewidth=2)
+// plot(sell_score, "Sell Score", color=#FF4757, linewidth=2)
