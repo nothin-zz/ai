@@ -1,0 +1,414 @@
+//@version=5
+indicator("PF Master v4 [SNR+ICT+FIBO]", shorttitle="PF v4", overlay=true, max_boxes_count=150, max_lines_count=200, max_labels_count=150)
+
+// ══════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════
+g1 = "SNR"
+snr_lb   = input.int(20,   "Lookback",     group=g1, minval=5, maxval=100)
+show_snr = input.bool(true,"Show Zones",   group=g1)
+
+g2 = "ICT"
+show_ob  = input.bool(true,"Order Blocks", group=g2)
+show_fvg = input.bool(true,"FVG",          group=g2)
+show_liq = input.bool(true,"Liquidity",    group=g2)
+liq_lb   = input.int(30,   "Liq Lookback", group=g2, minval=10, maxval=100)
+
+g3 = "FIBONACCI"
+fib_lb   = input.int(50,  "Swing Lookback", group=g3, minval=20, maxval=200)
+show_fib = input.bool(true,"Show Fibs",     group=g3)
+
+g4 = "TREND"
+ema_f    = input.int(50,   "EMA Fast",  group=g4)
+ema_s    = input.int(200,  "EMA Slow",  group=g4)
+show_ema = input.bool(true,"Show EMA",  group=g4)
+
+g5 = "SIGNALS"
+show_sig = input.bool(true, "Show Signals",    group=g5)
+show_tp  = input.bool(true, "Show SL/TP Lines",group=g5)
+rr1      = input.float(2.0, "TP1 RR",          group=g5, minval=1.0, step=0.5)
+rr2      = input.float(3.5, "TP2 RR",          group=g5, minval=1.0, step=0.5)
+sl_buf   = input.float(0.3, "SL Buffer x ATR", group=g5, minval=0.1, step=0.1)
+
+g6 = "PANEL"
+show_panel = input.bool(true, "Show Dashboard", group=g6)
+
+// ══════════════════════════════════════════
+// CORE
+// ══════════════════════════════════════════
+atr    = ta.atr(14)
+ema50  = ta.ema(close, ema_f)
+ema200 = ta.ema(close, ema_s)
+bull   = ema50 > ema200
+bear   = ema50 < ema200
+
+plot(show_ema ? ema50  : na, "EMA50",  color=color.new(#FFD700,40), linewidth=1)
+plot(show_ema ? ema200 : na, "EMA200", color=color.new(#FF4757,30), linewidth=2)
+
+// ══════════════════════════════════════════
+// SWING
+// ══════════════════════════════════════════
+swingH(lb) =>
+    h  = high[lb]
+    ok = true
+    for i = 0 to lb - 1
+        if high[i] > h or high[lb*2-i] > h
+            ok := false
+    ok
+
+swingL(lb) =>
+    l  = low[lb]
+    ok = true
+    for i = 0 to lb - 1
+        if low[i] < l or low[lb*2-i] < l
+            ok := false
+    ok
+
+isH = swingH(snr_lb)
+isL = swingL(snr_lb)
+
+// ══════════════════════════════════════════
+// SNR ZONES
+// ══════════════════════════════════════════
+var float[] sh = array.new_float()
+var float[] sl_arr = array.new_float()
+
+if isH
+    array.push(sh, high[snr_lb])
+    if array.size(sh) > 15
+        array.shift(sh)
+if isL
+    array.push(sl_arr, low[snr_lb])
+    if array.size(sl_arr) > 15
+        array.shift(sl_arr)
+
+res = array.size(sh)     > 0 ? array.get(sh,     array.size(sh)-1)     : na
+sup = array.size(sl_arr) > 0 ? array.get(sl_arr, array.size(sl_arr)-1) : na
+zh  = atr * 0.4
+
+if show_snr and not na(res) and isH
+    box.new(bar_index-snr_lb, res+zh, bar_index+25, res-zh, bgcolor=color.new(#FF6B35,88), border_color=color.new(#FF6B35,50), border_width=1)
+    label.new(bar_index-snr_lb, res+zh*2, "R", style=label.style_label_down, color=color.new(#FF6B35,70), textcolor=color.new(#FF6B35,0), size=size.tiny)
+
+if show_snr and not na(sup) and isL
+    box.new(bar_index-snr_lb, sup+zh, bar_index+25, sup-zh, bgcolor=color.new(#00D4FF,88), border_color=color.new(#00D4FF,50), border_width=1)
+    label.new(bar_index-snr_lb, sup-zh*2, "S", style=label.style_label_up, color=color.new(#00D4FF,70), textcolor=color.new(#00D4FF,0), size=size.tiny)
+
+// ══════════════════════════════════════════
+// ORDER BLOCKS
+// ══════════════════════════════════════════
+bullImp = (close-open)/atr > 1.5 and close > close[1]
+bearImp = (open-close)/atr > 1.5 and close < close[1]
+bullOB  = bullImp and close[1] < open[1]
+bearOB  = bearImp and close[1] > open[1]
+
+if show_ob and bullOB
+    box.new(bar_index-1, open[1], bar_index+12, close[1], bgcolor=color.new(#A8FF78,90), border_color=color.new(#A8FF78,55), border_width=1)
+if show_ob and bearOB
+    box.new(bar_index-1, close[1], bar_index+12, open[1], bgcolor=color.new(#FF9FF3,90), border_color=color.new(#FF9FF3,55), border_width=1)
+
+// ══════════════════════════════════════════
+// FVG
+// ══════════════════════════════════════════
+bFVG = show_fvg and low > high[2]
+sFVG = show_fvg and high < low[2]
+
+if bFVG
+    box.new(bar_index-2, low, bar_index+6, high[2], bgcolor=color.new(#FFD700,92), border_color=color.new(#FFD700,65), border_width=1)
+if sFVG
+    box.new(bar_index-2, low[2], bar_index+6, high, bgcolor=color.new(#FFD700,92), border_color=color.new(#FFD700,65), border_width=1)
+
+// ══════════════════════════════════════════
+// LIQUIDITY
+// ══════════════════════════════════════════
+liqH = ta.highest(high, liq_lb)
+liqL = ta.lowest(low,   liq_lb)
+
+if show_liq
+    line.new(bar_index-liq_lb, liqH, bar_index+8, liqH, color=color.new(#FFD700,60), width=1, style=line.style_dashed)
+    line.new(bar_index-liq_lb, liqL, bar_index+8, liqL, color=color.new(#FF4757,60), width=1, style=line.style_dashed)
+
+bslSwept = high >= liqH[1] and close < liqH[1]
+sslSwept = low  <= liqL[1] and close > liqL[1]
+
+if show_liq and bslSwept
+    label.new(bar_index, high+atr*0.7, "BSL", style=label.style_label_down, color=color.new(#FF4757,75), textcolor=color.new(#FFD700,0), size=size.tiny)
+if show_liq and sslSwept
+    label.new(bar_index, low-atr*0.7, "SSL", style=label.style_label_up, color=color.new(#00D4FF,75), textcolor=color.new(#FFD700,0), size=size.tiny)
+
+// ══════════════════════════════════════════
+// FIBONACCI
+// ══════════════════════════════════════════
+fibH   = ta.highest(high, fib_lb)
+fibL   = ta.lowest(low,   fib_lb)
+fibRng = fibH - fibL
+
+f382 = fibH - fibRng * 0.382
+f500 = fibH - fibRng * 0.500
+f618 = fibH - fibRng * 0.618
+f786 = fibH - fibRng * 0.786
+
+plot(show_fib ? f618 : na, "61.8%", color=color.new(#00D4FF,40), linewidth=2)
+plot(show_fib ? f500 : na, "50.0%", color=color.new(#A8FF78,55), linewidth=1)
+plot(show_fib ? f382 : na, "38.2%", color=color.new(#FFD700,55), linewidth=1)
+plot(show_fib ? f786 : na, "78.6%", color=color.new(#FF6B35,65), linewidth=1)
+
+tol       = fibRng * 0.03
+nearF618B = close >= f618-tol and close <= f618+tol
+nearF618S = close >= f382-tol and close <= f382+tol
+
+// ══════════════════════════════════════════
+// CHoCH
+// ══════════════════════════════════════════
+phigh  = ta.highest(high, 10)[1]
+plow   = ta.lowest(low,   10)[1]
+chochB = close > phigh and close[1] <= phigh
+chochS = close < plow  and close[1] >= plow
+
+if chochB
+    label.new(bar_index, low-atr*0.4, "CHoCH", style=label.style_label_up, color=color.new(#A8FF78,80), textcolor=color.new(#A8FF78,0), size=size.tiny)
+if chochS
+    label.new(bar_index, high+atr*0.4, "CHoCH", style=label.style_label_down, color=color.new(#FF4757,80), textcolor=color.new(#FF4757,0), size=size.tiny)
+
+// ══════════════════════════════════════════
+// SESSION
+// ══════════════════════════════════════════
+lon    = not na(time(timeframe.period, "0700-1200", "Europe/London"))
+ny     = not na(time(timeframe.period, "1300-1800", "Europe/London"))
+inSess = lon or ny
+bgcolor(inSess ? color.new(#FFFFFF,97) : na, title="Session")
+
+// ══════════════════════════════════════════
+// SCORE
+// ══════════════════════════════════════════
+nearSup = not na(sup) and close <= sup+atr*2 and close >= sup-atr*2
+nearRes = not na(res) and close >= res-atr*2 and close <= res+atr*2
+
+bScore = (bull       ? 1 : 0)
+       + (nearSup    ? 1 : 0)
+       + (nearF618B  ? 1 : 0)
+       + (sslSwept or sslSwept[1] or sslSwept[2] ? 1 : 0)
+       + (chochB     ? 1 : 0)
+       + (bullOB[1]  or bullOB[2]  ? 1 : 0)
+       + (bFVG[1]    or bFVG[2]    ? 1 : 0)
+       + (inSess     ? 1 : 0)
+
+sScore = (bear       ? 1 : 0)
+       + (nearRes    ? 1 : 0)
+       + (nearF618S  ? 1 : 0)
+       + (bslSwept or bslSwept[1] or bslSwept[2] ? 1 : 0)
+       + (chochS     ? 1 : 0)
+       + (bearOB[1]  or bearOB[2]  ? 1 : 0)
+       + (sFVG[1]    or sFVG[2]    ? 1 : 0)
+       + (inSess     ? 1 : 0)
+
+buySig  = bScore >= 4 and not (bScore[1] >= 4)
+sellSig = sScore >= 4 and not (sScore[1] >= 4)
+
+qual(s) => s >= 7 ? "A+" : s >= 6 ? "A" : s >= 5 ? "B+" : s >= 4 ? "B" : "C"
+
+// ══════════════════════════════════════════
+// WIN / LOSS TRACKER
+// Checks if TP1 or SL was hit first
+// after signal bar
+// ══════════════════════════════════════════
+var int   totalTrades = 0
+var int   wins        = 0   // TP1 hit first
+var int   losses      = 0   // SL hit first
+var float pnlPips     = 0.0
+
+// Track open trade state
+var bool  inTrade     = false
+var bool  isBuyTrade  = false
+var float tradeEntry  = na
+var float tradeSL     = na
+var float tradeTP1    = na
+var float tradeTP2    = na
+var int   tradeBar    = na
+
+// Open new trade on signal
+if buySig and not inTrade
+    inTrade    := true
+    isBuyTrade := true
+    tradeEntry := close
+    tradeSL    := close - atr * sl_buf * (1/sl_buf + rr1*0 + 0)  // recalc properly
+    tradeSL    := low - atr * sl_buf
+    tradeTP1   := close + (close - tradeSL) * rr1
+    tradeTP2   := close + (close - tradeSL) * rr2
+    tradeBar   := bar_index
+    totalTrades := totalTrades + 1
+
+if sellSig and not inTrade
+    inTrade    := true
+    isBuyTrade := false
+    tradeEntry := close
+    tradeSL    := high + atr * sl_buf
+    tradeTP1   := close - (tradeSL - close) * rr1
+    tradeTP2   := close - (tradeSL - close) * rr2
+    tradeBar   := bar_index
+    totalTrades := totalTrades + 1
+
+// Check result for open trade
+if inTrade and not na(tradeSL) and not na(tradeTP1)
+    if isBuyTrade
+        // TP1 hit
+        if high >= tradeTP1
+            wins    := wins + 1
+            pnlPips := pnlPips + math.abs(tradeTP1 - tradeEntry)
+            inTrade := false
+        // SL hit
+        else if low <= tradeSL
+            losses  := losses + 1
+            pnlPips := pnlPips - math.abs(tradeEntry - tradeSL)
+            inTrade := false
+    else
+        // TP1 hit
+        if low <= tradeTP1
+            wins    := wins + 1
+            pnlPips := pnlPips + math.abs(tradeEntry - tradeTP1)
+            inTrade := false
+        // SL hit
+        else if high >= tradeSL
+            losses  := losses + 1
+            pnlPips := pnlPips - math.abs(tradeSL - tradeEntry)
+            inTrade := false
+
+// Win rate
+closedTrades = wins + losses
+winRate      = closedTrades > 0 ? math.round(wins / closedTrades * 100) : 0
+pnlSign      = pnlPips >= 0 ? "+" : ""
+
+// ══════════════════════════════════════════
+// SIGNALS — minimal clean labels
+// ══════════════════════════════════════════
+if show_sig and buySig
+    slB  = low  - atr * sl_buf
+    tp1B = close + (close - slB) * rr1
+    tp2B = close + (close - slB) * rr2
+
+    label.new(bar_index, low - atr*1.4,
+        "▲ BUY " + qual(bScore) + "  " + str.tostring(bScore) + "/8\n" +
+        "E:" + str.tostring(close,"#.##") + "  SL:" + str.tostring(slB,"#.##") + "\n" +
+        "T1:" + str.tostring(tp1B,"#.##") + "  T2:" + str.tostring(tp2B,"#.##"),
+        style=label.style_label_up,
+        color=color.new(#003D5C,15),
+        textcolor=color.new(#00D4FF,0),
+        size=size.small)
+
+    if show_tp
+        line.new(bar_index, slB,  bar_index+22, slB,  color=color.new(#FF4757,30), width=1, style=line.style_dashed)
+        line.new(bar_index, tp1B, bar_index+22, tp1B, color=color.new(#A8FF78,20), width=2, style=line.style_dashed)
+        line.new(bar_index, tp2B, bar_index+22, tp2B, color=color.new(#FFD700,40), width=1, style=line.style_dotted)
+
+if show_sig and sellSig
+    slS  = high + atr * sl_buf
+    tp1S = close - (slS - close) * rr1
+    tp2S = close - (slS - close) * rr2
+
+    label.new(bar_index, high + atr*1.4,
+        "▼ SELL " + qual(sScore) + "  " + str.tostring(sScore) + "/8\n" +
+        "E:" + str.tostring(close,"#.##") + "  SL:" + str.tostring(slS,"#.##") + "\n" +
+        "T1:" + str.tostring(tp1S,"#.##") + "  T2:" + str.tostring(tp2S,"#.##"),
+        style=label.style_label_down,
+        color=color.new(#3D0010,15),
+        textcolor=color.new(#FF4757,0),
+        size=size.small)
+
+    if show_tp
+        line.new(bar_index, slS,  bar_index+22, slS,  color=color.new(#FF4757,30), width=1, style=line.style_dashed)
+        line.new(bar_index, tp1S, bar_index+22, tp1S, color=color.new(#A8FF78,20), width=2, style=line.style_dashed)
+        line.new(bar_index, tp2S, bar_index+22, tp2S, color=color.new(#FFD700,40), width=1, style=line.style_dotted)
+
+// ══════════════════════════════════════════
+// BAR COLOR
+// ══════════════════════════════════════════
+barcolor(buySig  ? color.new(#00D4FF,55) : na, title="BUY bar")
+barcolor(sellSig ? color.new(#FF4757,55) : na, title="SELL bar")
+
+// ══════════════════════════════════════════
+// DASHBOARD — clean, collapsible
+// ══════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 14,
+    bgcolor    = color.new(#050810,10),
+    border_color = color.new(#1E2D40,60),
+    border_width = 1,
+    frame_color  = color.new(#C9A84C,50),
+    frame_width  = 1)
+
+TXT_HDR  = size.small
+TXT_BODY = size.tiny
+COL_KEY  = color.new(#607080,0)
+COL_VAL  = color.new(#E0E8F0,0)
+COL_GOLD = color.new(#C9A84C,0)
+COL_BG   = color.new(#080E1A,0)
+COL_BG2  = color.new(#0D1525,0)
+
+if barstate.islast and show_panel
+    // ── Header
+    table.cell(dash, 0, 0, "PF MASTER v4",   bgcolor=color.new(#0D1A2A,0), text_color=COL_GOLD, text_size=TXT_HDR, text_halign=text.align_center)
+    table.cell(dash, 1, 0, "SNR+ICT+FIBO",   bgcolor=color.new(#0D1A2A,0), text_color=color.new(#4A6A8A,0), text_size=size.tiny, text_halign=text.align_center)
+
+    // ── Trend + Session
+    table.cell(dash, 0, 1, "TREND",   bgcolor=COL_BG2, text_color=COL_KEY,  text_size=TXT_BODY)
+    table.cell(dash, 1, 1, bull ? "BULL ▲" : "BEAR ▼", bgcolor=COL_BG2, text_color=bull ? color.new(#00D4FF,0) : color.new(#FF4757,0), text_size=TXT_BODY)
+
+    table.cell(dash, 0, 2, "SESSION", bgcolor=COL_BG,  text_color=COL_KEY,  text_size=TXT_BODY)
+    table.cell(dash, 1, 2, inSess ? "ACTIVE" : "CLOSED", bgcolor=COL_BG, text_color=inSess ? color.new(#A8FF78,0) : color.new(#445566,0), text_size=TXT_BODY)
+
+    // ── Scores
+    bCol = bScore >= 5 ? color.new(#00D4FF,0) : bScore >= 4 ? color.new(#FFD700,0) : color.new(#FF4757,0)
+    sCol = sScore >= 5 ? color.new(#FF4757,0) : sScore >= 4 ? color.new(#FFD700,0) : color.new(#445566,0)
+
+    table.cell(dash, 0, 3, "BUY  SCORE", bgcolor=COL_BG2, text_color=COL_KEY, text_size=TXT_BODY)
+    table.cell(dash, 1, 3, str.tostring(bScore) + "/8  [" + qual(bScore) + "]", bgcolor=COL_BG2, text_color=bCol, text_size=TXT_BODY)
+
+    table.cell(dash, 0, 4, "SELL SCORE", bgcolor=COL_BG,  text_color=COL_KEY, text_size=TXT_BODY)
+    table.cell(dash, 1, 4, str.tostring(sScore) + "/8  [" + qual(sScore) + "]", bgcolor=COL_BG,  text_color=sCol, text_size=TXT_BODY)
+
+    // ── Divider label
+    table.cell(dash, 0, 5, "── STATS ──", bgcolor=color.new(#0A1220,0), text_color=color.new(#2A3A4A,0), text_size=size.tiny, text_halign=text.align_center)
+    table.cell(dash, 1, 5, "",            bgcolor=color.new(#0A1220,0), text_color=color.new(#2A3A4A,0), text_size=size.tiny)
+
+    // ── Win/Loss stats
+    table.cell(dash, 0, 6, "TRADES",   bgcolor=COL_BG2, text_color=COL_KEY, text_size=TXT_BODY)
+    table.cell(dash, 1, 6, str.tostring(totalTrades), bgcolor=COL_BG2, text_color=COL_VAL, text_size=TXT_BODY)
+
+    table.cell(dash, 0, 7, "WINS",     bgcolor=COL_BG,  text_color=COL_KEY, text_size=TXT_BODY)
+    table.cell(dash, 1, 7, str.tostring(wins),   bgcolor=COL_BG,  text_color=color.new(#A8FF78,0), text_size=TXT_BODY)
+
+    table.cell(dash, 0, 8, "LOSSES",   bgcolor=COL_BG2, text_color=COL_KEY, text_size=TXT_BODY)
+    table.cell(dash, 1, 8, str.tostring(losses), bgcolor=COL_BG2, text_color=color.new(#FF4757,0), text_size=TXT_BODY)
+
+    wrCol = winRate >= 60 ? color.new(#A8FF78,0) : winRate >= 50 ? color.new(#FFD700,0) : color.new(#FF4757,0)
+    table.cell(dash, 0, 9, "WIN RATE", bgcolor=COL_BG,  text_color=COL_KEY, text_size=TXT_BODY)
+    table.cell(dash, 1, 9, str.tostring(winRate) + "%", bgcolor=COL_BG, text_color=wrCol, text_size=TXT_BODY)
+
+    pnlCol = pnlPips >= 0 ? color.new(#A8FF78,0) : color.new(#FF4757,0)
+    table.cell(dash, 0, 10, "NET PIPS", bgcolor=COL_BG2, text_color=COL_KEY, text_size=TXT_BODY)
+    table.cell(dash, 1, 10, pnlSign + str.tostring(math.round(pnlPips,2)), bgcolor=COL_BG2, text_color=pnlCol, text_size=TXT_BODY)
+
+    // ── Divider
+    table.cell(dash, 0, 11, "── LEVELS ──", bgcolor=color.new(#0A1220,0), text_color=color.new(#2A3A4A,0), text_size=size.tiny, text_halign=text.align_center)
+    table.cell(dash, 1, 11, "",             bgcolor=color.new(#0A1220,0), text_color=color.new(#2A3A4A,0), text_size=size.tiny)
+
+    // ── Key levels
+    table.cell(dash, 0, 12, "FIB 61.8", bgcolor=COL_BG,  text_color=COL_KEY, text_size=TXT_BODY)
+    table.cell(dash, 1, 12, str.tostring(f618,"#.####"),  bgcolor=COL_BG, text_color=color.new(#00D4FF,0), text_size=TXT_BODY)
+
+    // ── Status
+    sigTxt = buySig ? "BUY SIGNAL" : sellSig ? "SELL SIGNAL" : inTrade ? "IN TRADE..." : "WAITING"
+    sigCol = buySig ? color.new(#00D4FF,0) : sellSig ? color.new(#FF4757,0) : inTrade ? color.new(#FFD700,0) : color.new(#334455,0)
+    sigBG  = buySig ? color.new(#003D5C,60) : sellSig ? color.new(#3D0010,60) : inTrade ? color.new(#3D3000,60) : color.new(#0A1220,0)
+    table.cell(dash, 0, 13, "STATUS", bgcolor=sigBG, text_color=COL_KEY, text_size=TXT_BODY)
+    table.cell(dash, 1, 13, sigTxt,   bgcolor=sigBG, text_color=sigCol,  text_size=TXT_BODY)
+
+// ══════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════
+alertcondition(buySig,   "BUY Signal",  "BUY on {{ticker}} {{interval}} | Entry:{{close}}")
+alertcondition(sellSig,  "SELL Signal", "SELL on {{ticker}} {{interval}} | Entry:{{close}}")
+alertcondition(sslSwept, "SSL Swept",   "SSL Swept {{ticker}} — BUY setup incoming")
+alertcondition(bslSwept, "BSL Swept",   "BSL Swept {{ticker}} — SELL setup incoming")
+
+plot(bScore, "Buy Score",  color=color.new(#00D4FF,80), display=display.none)
+plot(sScore, "Sell Score", color=color.new(#FF4757,80), display=display.none)
